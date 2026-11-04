@@ -1,3 +1,12 @@
-# project_bbsby
-# project_bbsby
-# project_bbsby
+# Проєкт 1 — Захищений канал телеметрії з обмеженою пропускною здатністю (`TLM1`)
+
+## Структура репозиторію та розподіл гілок
+
+- `telemetry` — `src/telemetry.py` (серіалізація/парсинг 12-байтових кадрів, читання `session.bin`)
+- `classification` — `src/classification.py` (віконні ознаки, MLP-класифікатор, пріоритети кадрів)
+- `huffman` — `src/huffman.py` (побудова дерева Гаффмана $\le 15$ біт, канонічні коди, бітовий потік)
+- `dp` — `src/dp.py` (задача про рюкзак 0/1: DP, Greedy, Brute-force, формування payload, планувальник)
+- `crypto` — `src/crypto.py` (PBKDF2-HMAC-SHA256 з кешем, AES-256-CTR з лічильником від 1, HMAC-SHA256)
+- `receiver` — `src/receiver.py` (валідація пакета у постійний час, коди відмови `E_*`, декодування)
+- `channel` — `src/channel_runner.py` (інтеграція з `channel.py`, прогін 3 сценаріїв, розрахунок метрики `Q`)
+- `ga` — `src/ga.py` (генетичний алгоритм оптимізації параметрів та порівняння з Random Search)

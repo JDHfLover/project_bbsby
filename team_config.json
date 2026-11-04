@@ -1,0 +1,42 @@
+{
+  "max_packet_bytes": 512,
+  "candidate_window_frames": 64,
+  "password": "algo2026",
+  "пріоритети_кадрів": {
+    "0": 10,
+    "1": 50,
+    "2": 25,
+    "critical_бонус": 100
+  },
+  "метрика_Q": {
+    "alpha": 0.35,
+    "beta": 0.45,
+    "gamma": 0.20
+  },
+  "канал": {
+    "seed_моделі_каналу": 42,
+    "сценарії": {
+      "спокійний": {
+        "loss_probability": 0.0,
+        "втрати_пачками": { "середня_довжина_пачки": 1 },
+        "delay_ms": 20,
+        "bandwidth_bps": 64000,
+        "transmission_budget_s": 60.0
+      },
+      "робочий": {
+        "loss_probability": 0.03,
+        "втрати_пачками": { "середня_довжина_пачки": 1 },
+        "delay_ms": [20, 120],
+        "bandwidth_bps": 32000,
+        "transmission_budget_s": 30.0
+      },
+      "аварійний": {
+        "loss_probability": 0.15,
+        "втрати_пачками": { "середня_довжина_пачки": 3 },
+        "delay_ms": [50, 500],
+        "bandwidth_bps": 12000,
+        "transmission_budget_s": 10.0
+      }
+    }
+  }
+}
