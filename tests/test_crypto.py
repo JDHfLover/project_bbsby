@@ -21,7 +21,6 @@ from src.crypto import (
     build_packet_nonce,
     clear_key_cache,
     compare_crypto_compression_order,
-    compute_hmac,
     derive_keys,
     get_kdf_call_count,
     resolve_session_password,
