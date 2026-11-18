@@ -11,8 +11,6 @@ import pytest
 
 from src.crypto import (
     HEADER_FORMAT,
-    HEADER_SIZE,
-    HMAC_SIZE,
     aes_256_ctr_crypt,
     compute_hmac,
     derive_keys,
