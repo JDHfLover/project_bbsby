@@ -1,0 +1,7 @@
+dataset,order,frames,raw_bytes,huffman_table_bytes,bitstream_bytes,payload_bytes,packet_bytes,data_ratio,payload_ratio
+ref_04_64_frames,compress_then_encrypt,64,768,258,424,696,771,1.8113,1.1034
+ref_04_64_frames,encrypt_then_compress,64,768,496,750,1260,1335,1.0240,0.6095
+session_windows_64_sum,compress_then_encrypt,3000,36000,10868,20580,32106,35631,1.7493,1.1213
+session_windows_64_sum,encrypt_then_compress,3000,36000,22884,35015,58557,62082,1.0281,0.6148
+session_full_3000_frames,compress_then_encrypt,3000,36000,512,24062,24588,24663,1.4961,1.4641
+session_full_3000_frames,encrypt_then_compress,3000,36000,512,36000,36526,36601,1.0000,0.9856
