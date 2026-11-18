@@ -266,3 +266,34 @@ def test_full_3000_frames_stream_packing_and_seq_order():
         dp_i, _ = select_frames_for_packet(w_frames, w_vals, 512 - 75, strategy="dp")
         gr_i, _ = select_frames_for_packet(w_frames, w_vals, 512 - 75, strategy="greedy")
         assert sum(w_vals[i] for i in dp_i) >= sum(w_vals[i] for i in gr_i)
+
+
+def test_regression_k1_no_queue_stagnation_concentrates_critical_frames():
+    """Регресійний тест K-1: невибрані некритичні кадри не забивають вікно — усі 300 critical у <=47 пакетах."""
+    frames = _make_synthetic_frames(3000, seed=42)
+    values = [1 + 5 * f.critical for f in frames]
+    packed = pack_telemetry_stream(
+        frames,
+        values=values,
+        max_packet_bytes=512,
+        candidate_window_frames=64,
+        strategy="dp",
+        salt=bytes(range(16)),
+        session_nonce_prefix=b"REGK1001",
+        return_meta=True,
+    )
+    crit_pkts = [meta for _, meta in packed if meta["critical_count"] > 0]
+    assert len(crit_pkts) <= 47
+    assert sum(meta["critical_count"] for _, meta in packed[:47]) == 300
+
+
+def test_regression_k2_compression_threshold_monotonic_on_unit_interval():
+    """Регресійний тест K-2: _should_use_no_compression монотонна на [0.0, 1.0]."""
+    from src.dp import _should_use_no_compression
+
+    thresholds = [0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0]
+    # За фіксованої економії 40% (raw=1000, compressed=600) перехід False -> True відбувається рівно один раз
+    decisions = [_should_use_no_compression(1000, 600, t) for t in thresholds]
+    assert decisions == [False, False, False, False, True, True, True, True, True]
+    for prev, curr in zip(decisions, decisions[1:]):
+        assert int(curr) >= int(prev)
