@@ -1,21 +1,607 @@
-"""Модуль для гілки `ga`: генетичний алгоритм та Random Search для підбору гіперпараметрів."""
+"""Модуль гілки `ga`: генетичний алгоритм, Random Search, межі генів і журнал еволюції."""
+from __future__ import annotations
 
-def get_default_hyperparams(config: dict) -> dict:
+import csv
+import json
+import os
+import random
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+
+GENE_BOUNDS: dict[str, tuple[float | int, float | int, str]] = {
+    "block_size": (16, 64, "int"),
+    "compression_threshold": (0.0, 1.0, "float"),
+    "priority_weight": (0.0, 10.0, "float"),
+}
+OPTIONAL_PACKET_GENE_BOUNDS: dict[str, tuple[float | int, float | int, str]] = {
+    "max_packet_bytes": (192, 512, "int"),
+}
+
+FORBIDDEN_CHANNEL_SEED = 425243
+DEFAULT_TRAIN_SEEDS: tuple[int, ...] = (11, 12)
+DEFAULT_VAL_SEEDS: tuple[int, ...] = (21, 22, 23, 24, 25)
+DEFAULT_TRAIN_SCENARIOS: tuple[str, ...] = ("робочий", "аварійний")
+DEFAULT_VAL_SCENARIOS: tuple[str, ...] = ("спокійний", "робочий", "аварійний")
+
+CROSSOVER_KINDS = ("uniform", "single_point", "arithmetic")
+
+
+def get_default_hyperparams(config: dict | None = None) -> dict[str, int | float]:
     """Повертає базові параметри системи для вимірювання Q_baseline (Чекпоінт 1)."""
+    pack_cfg = config.get("пакування", config) if isinstance(config, dict) else {}
     return {
-        "block_size": int(config.get("candidate_window_frames", 64)),
+        "block_size": int(pack_cfg.get("candidate_window_frames", 64)),
         "compression_threshold": 0.98,
         "priority_weight": 1.0,
     }
 
 
-def optimize_with_ga(fitness_fn, config: dict, budget: int = 200) -> tuple[dict, float]:
-    """Підбирає параметри за допомогою генетичного алгоритму з елітизмом (Чекпоінт 3)."""
-    raise NotImplementedError("TODO: реалізувати у гілці ga")
+def validate_seed_split(
+    train_seeds: Sequence[int] = DEFAULT_TRAIN_SEEDS,
+    val_seeds: Sequence[int] = DEFAULT_VAL_SEEDS,
+) -> None:
+    """Перевіряє, що навчальні та валідаційні seed не порожні, не перетинаються і не містять 425243."""
+    if not train_seeds or not val_seeds:
+        raise ValueError("Списки train_seeds і val_seeds не можуть бути порожніми")
+    train_set = set(train_seeds)
+    val_set = set(val_seeds)
+    if FORBIDDEN_CHANNEL_SEED in train_set or FORBIDDEN_CHANNEL_SEED in val_set:
+        raise ValueError(
+            f"Відкритий налагоджувальний seed {FORBIDDEN_CHANNEL_SEED} заборонено використовувати у ГА"
+        )
+    overlap = train_set & val_set
+    if overlap:
+        raise ValueError(f"train_seeds і val_seeds не повинні перетинатися: {sorted(overlap)}")
+
+
+def _resolve_bounds(
+    bounds: Mapping[str, tuple[float | int, float | int, str]] | None,
+) -> dict[str, tuple[float | int, float | int, str]]:
+    eff = dict(GENE_BOUNDS if bounds is None else bounds)
+    if not eff:
+        raise ValueError("Словник меж генів не може бути порожнім")
+    for name, (lo, hi, kind) in eff.items():
+        if kind not in ("int", "float"):
+            raise ValueError(f"Невідомий тип гена {name!r}: {kind!r}")
+        if float(lo) > float(hi):
+            raise ValueError(f"Некоректні межі для {name!r}: ({lo}, {hi})")
+    return eff
+
+
+def clip_and_repair_chromosome(
+    genes: Mapping[str, float | int],
+    bounds: Mapping[str, tuple[float | int, float | int, str]] = GENE_BOUNDS,
+) -> dict[str, int | float]:
+    """Кліпує гени у задані межі та відновлює точний тип (`int` для цілих, `float` для дійсних)."""
+    repaired: dict[str, int | float] = {}
+    for name, (lo, hi, kind) in bounds.items():
+        if name not in genes:
+            raise KeyError(f"У хромосомі відсутній ген {name!r}")
+        raw_val = float(genes[name])
+        if kind == "int":
+            lo_i, hi_i = int(lo), int(hi)
+            val_i = int(round(raw_val))
+            repaired[name] = max(lo_i, min(hi_i, val_i))
+        else:
+            lo_f, hi_f = float(lo), float(hi)
+            repaired[name] = float(max(lo_f, min(hi_f, raw_val)))
+    return repaired
+
+
+def sample_random_chromosome(
+    rng: random.Random,
+    bounds: Mapping[str, tuple[float | int, float | int, str]] = GENE_BOUNDS,
+) -> dict[str, int | float]:
+    """Рівномірно генерує одну хромосому у просторі `bounds`."""
+    genes: dict[str, int | float] = {}
+    for name, (lo, hi, kind) in bounds.items():
+        if kind == "int":
+            genes[name] = rng.randint(int(lo), int(hi))
+        else:
+            genes[name] = rng.uniform(float(lo), float(hi))
+    return genes
+
+
+def tournament_select(
+    population: Sequence[Mapping[str, int | float]],
+    fitnesses: Sequence[float],
+    rng: random.Random,
+    k: int = 3,
+) -> dict[str, int | float]:
+    """Турнірна селекція розміру `k` (при рівності повертає першого з обраних кандидатів)."""
+    if not population or len(population) != len(fitnesses):
+        raise ValueError("Некоректні розміри population та fitnesses")
+    if k < 1:
+        raise ValueError(f"Розмір турніру k має бути >= 1, отримано {k}")
+
+    eff_k = min(k, len(population))
+    candidates = rng.sample(range(len(population)), eff_k)
+    best_idx = max(candidates, key=lambda idx: fitnesses[idx])
+    return dict(population[best_idx])
+
+
+def crossover_chromosomes(
+    parent1: Mapping[str, int | float],
+    parent2: Mapping[str, int | float],
+    rng: random.Random,
+    crossover_rate: float = 0.8,
+    kind: str = "uniform",
+    bounds: Mapping[str, tuple[float | int, float | int, str]] = GENE_BOUNDS,
+) -> dict[str, int | float]:
+    """Виконує кросовер (`uniform`, `single_point` або `arithmetic`) і ремонт меж."""
+    if kind not in CROSSOVER_KINDS:
+        raise ValueError(f"Невідомий тип кросоверу {kind!r}; допустимо: {CROSSOVER_KINDS}")
+
+    keys = list(bounds.keys())
+    if rng.random() >= crossover_rate:
+        return clip_and_repair_chromosome(parent1, bounds=bounds)
+
+    child: dict[str, int | float] = {}
+    if kind == "uniform":
+        for name in keys:
+            child[name] = parent1[name] if rng.random() < 0.5 else parent2[name]
+    elif kind == "single_point":
+        if len(keys) <= 1:
+            child = dict(parent1)
+        else:
+            cut = rng.randint(1, len(keys) - 1)
+            for idx, name in enumerate(keys):
+                child[name] = parent1[name] if idx < cut else parent2[name]
+    else:  # arithmetic
+        alpha = rng.random()
+        for name in keys:
+            child[name] = alpha * float(parent1[name]) + (1.0 - alpha) * float(parent2[name])
+
+    return clip_and_repair_chromosome(child, bounds=bounds)
+
+
+def mutate_chromosome(
+    genes: Mapping[str, int | float],
+    rng: random.Random,
+    mutation_rate: float = 0.2,
+    sigma_scale: float = 0.1,
+    bounds: Mapping[str, tuple[float | int, float | int, str]] = GENE_BOUNDS,
+) -> dict[str, int | float]:
+    """
+    Гаусова мутація (`sigma = sigma_scale * (hi - lo)`) із гарантованим кроком `±1`
+    для цілих генів при нульовому округленому кроці та кліпінгом у `bounds`.
+    """
+    out: dict[str, int | float] = dict(genes)
+    for name, (lo, hi, kind) in bounds.items():
+        if rng.random() >= mutation_rate:
+            continue
+        span = float(hi) - float(lo)
+        if span <= 0.0:
+            continue
+
+        step = rng.gauss(0.0, sigma_scale * span)
+        if kind == "int":
+            lo_i, hi_i = int(lo), int(hi)
+            cur = max(lo_i, min(hi_i, int(round(float(out[name])))))
+            int_step = int(round(step))
+            if int_step == 0:
+                int_step = 1 if rng.random() < 0.5 else -1
+            cand = cur + int_step
+            if cand < lo_i:
+                cand = (lo_i + 1) if (cur == lo_i and lo_i < hi_i) else lo_i
+            elif cand > hi_i:
+                cand = (hi_i - 1) if (cur == hi_i and lo_i < hi_i) else hi_i
+            out[name] = cand
+        else:
+            out[name] = float(out[name]) + step
+
+    return clip_and_repair_chromosome(out, bounds=bounds)
+
+
+def save_ga_history_csv(
+    history_rows: Sequence[Mapping[str, object]],
+    path: str | os.PathLike[str],
+    gene_names: Sequence[str] | None = None,
+) -> None:
+    """Зберігає журнал еволюції ГА (`run_seed, generation, best_fitness, mean_fitness, evals_total, ...`)."""
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    eff_genes = list(GENE_BOUNDS.keys() if gene_names is None else gene_names)
+    fieldnames = ["run_seed", "generation", "best_fitness", "mean_fitness", "evals_total", *eff_genes]
+
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history_rows:
+            writer.writerow({col: row.get(col, "") for col in fieldnames})
+
+
+def save_best_params_json(
+    best_genes: Mapping[str, object],
+    best_fitness: float,
+    path: str | os.PathLike[str],
+    seed: int = 0,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    """Зберігає знайдену найкращу хромосому й метадані у JSON."""
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "best_genes": dict(best_genes),
+        "best_fitness": float(best_fitness),
+        "seed": int(seed),
+    }
+    if extra:
+        payload.update(dict(extra))
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+def optimize_with_ga(
+    fitness_fn: Callable[[dict[str, int | float]], float],
+    config: dict | None = None,
+    budget: int = 200,
+    pop_size: int = 20,
+    elitism: int = 2,
+    tournament_k: int = 3,
+    crossover_rate: float = 0.8,
+    mutation_rate: float = 0.2,
+    sigma_scale: float = 0.1,
+    crossover_kind: str = "uniform",
+    reevaluate_elite: bool = False,
+    eval_repeats: int = 1,
+    seed: int = 0,
+    bounds: Mapping[str, tuple[float | int, float | int, str]] | None = None,
+    return_history: bool = False,
+    history_csv_path: str | os.PathLike[str] | None = None,
+) -> tuple[dict[str, int | float], float] | tuple[dict[str, int | float], float, list[dict[str, object]]]:
+    """
+    Генетичний алгоритм з елітизмом, турнірною селекцією (k=3), кросовером і мутацією.
+    Гарантує використання рівно `budget` обчислень пристосованості (якщо `budget >= 1`).
+    """
+    if budget < 1:
+        raise ValueError(f"Бюджет обчислень має бути >= 1, отримано {budget}")
+    if pop_size < 1:
+        raise ValueError(f"Розмір популяції має бути >= 1, отримано {pop_size}")
+    if elitism < 0 or elitism >= pop_size:
+        raise ValueError(f"Еліта має бути в межах 0 <= elitism < pop_size ({pop_size}), отримано {elitism}")
+    if tournament_k < 1:
+        raise ValueError(f"tournament_k має бути >= 1, отримано {tournament_k}")
+    if eval_repeats < 1:
+        raise ValueError(f"eval_repeats має бути >= 1, отримано {eval_repeats}")
+
+    eff_bounds = _resolve_bounds(bounds)
+    rng = random.Random(seed)
+    evals_used = 0
+
+    best_genes: dict[str, int | float] | None = None
+    best_fitness = float("-inf")
+    history: list[dict[str, object]] = []
+
+    def evaluate(ind: Mapping[str, int | float]) -> float:
+        nonlocal evals_used, best_genes, best_fitness
+        n_calls = min(eval_repeats, budget - evals_used)
+        if n_calls <= 0:
+            raise RuntimeError("Спроба обчислення після вичерпання бюджету")
+        total = 0.0
+        ind_copy = dict(ind)
+        for _ in range(n_calls):
+            total += float(fitness_fn(dict(ind_copy)))
+            evals_used += 1
+        fit = total / n_calls
+        if best_genes is None or fit > best_fitness:
+            best_fitness = fit
+            best_genes = dict(ind_copy)
+        return fit
+
+    def record_generation(gen: int, pop: list[dict[str, int | float]], fits: list[float]) -> None:
+        top_idx = max(range(len(pop)), key=lambda idx: fits[idx])
+        row: dict[str, object] = {
+            "run_seed": seed,
+            "generation": gen,
+            "best_fitness": float(fits[top_idx]),
+            "mean_fitness": float(sum(fits) / len(fits)),
+            "evals_total": evals_used,
+            **{k: pop[top_idx][k] for k in eff_bounds},
+        }
+        history.append(row)
+
+    # Покоління 0
+    population: list[dict[str, int | float]] = []
+    fitnesses: list[float] = []
+    while len(population) < pop_size and evals_used < budget:
+        cand = sample_random_chromosome(rng, bounds=eff_bounds)
+        fit = evaluate(cand)
+        population.append(cand)
+        fitnesses.append(fit)
+
+    record_generation(0, population, fitnesses)
+
+    gen = 0
+    while evals_used < budget:
+        gen += 1
+        order = sorted(range(len(population)), key=lambda idx: fitnesses[idx], reverse=True)
+        next_pop: list[dict[str, int | float]] = []
+        next_fit: list[float] = []
+
+        # Перенесення еліти
+        for idx in order[:elitism]:
+            elite = dict(population[idx])
+            if reevaluate_elite:
+                if evals_used >= budget:
+                    break
+                next_pop.append(elite)
+                next_fit.append(evaluate(elite))
+            else:
+                next_pop.append(elite)
+                next_fit.append(fitnesses[idx])
+
+        # Генерація нащадків до заповнення популяції або вичерпання бюджету
+        while len(next_pop) < pop_size and evals_used < budget:
+            p1 = tournament_select(population, fitnesses, rng, k=tournament_k)
+            p2 = tournament_select(population, fitnesses, rng, k=tournament_k)
+            child = crossover_chromosomes(
+                p1,
+                p2,
+                rng,
+                crossover_rate=crossover_rate,
+                kind=crossover_kind,
+                bounds=eff_bounds,
+            )
+            child = mutate_chromosome(
+                child,
+                rng,
+                mutation_rate=mutation_rate,
+                sigma_scale=sigma_scale,
+                bounds=eff_bounds,
+            )
+            child_fit = evaluate(child)
+            next_pop.append(child)
+            next_fit.append(child_fit)
+
+        # Якщо бюджет закінчився посеред покоління — добираємо найкращих із попереднього покоління
+        if len(next_pop) < pop_size:
+            for idx in order[elitism:]:
+                if len(next_pop) >= pop_size:
+                    break
+                next_pop.append(dict(population[idx]))
+                next_fit.append(fitnesses[idx])
+
+        population = next_pop
+        fitnesses = next_fit
+        record_generation(gen, population, fitnesses)
+
+    if history_csv_path is not None:
+        save_ga_history_csv(history, history_csv_path, gene_names=list(eff_bounds.keys()))
+
+    # При стандартному елітизмі найкраща особина фінального покоління збігається з best_genes;
+    # повертаємо best_genes/best_fitness по поколіннях або знайдений оптимум.
+    final_top_idx = max(range(len(population)), key=lambda idx: fitnesses[idx])
+    final_best_genes = dict(population[final_top_idx])
+    final_best_fit = float(fitnesses[final_top_idx])
+    if not reevaluate_elite and elitism > 0:
+        out_genes, out_fit = final_best_genes, final_best_fit
+    else:
+        assert best_genes is not None
+        out_genes, out_fit = dict(best_genes), float(best_fitness)
+
+    if return_history:
+        return out_genes, out_fit, history
+    return out_genes, out_fit
 
 
 def optimize_with_random_search(
-    fitness_fn, config: dict, budget: int = 200
-) -> tuple[dict, float]:
-    """Базовий пошук випадковими параметрами при тому самому бюджеті обчислень (Чекпоінт 3)."""
-    raise NotImplementedError("TODO: реалізувати у гілці ga")
+    fitness_fn: Callable[[dict[str, int | float]], float],
+    config: dict | None = None,
+    budget: int = 200,
+    seed: int = 0,
+    bounds: Mapping[str, tuple[float | int, float | int, str]] | None = None,
+    eval_repeats: int = 1,
+    return_history: bool = False,
+) -> tuple[dict[str, int | float], float] | tuple[dict[str, int | float], float, list[dict[str, object]]]:
+    """Базовий пошук випадковими хромосомами за однакового бюджету обчислень `budget`."""
+    if budget < 1:
+        raise ValueError(f"Бюджет обчислень має бути >= 1, отримано {budget}")
+    if eval_repeats < 1:
+        raise ValueError(f"eval_repeats має бути >= 1, отримано {eval_repeats}")
+
+    eff_bounds = _resolve_bounds(bounds)
+    rng = random.Random(seed)
+    evals_used = 0
+    best_genes: dict[str, int | float] | None = None
+    best_fitness = float("-inf")
+    history: list[dict[str, object]] = []
+
+    step = 0
+    while evals_used < budget:
+        cand = sample_random_chromosome(rng, bounds=eff_bounds)
+        n_calls = min(eval_repeats, budget - evals_used)
+        total = 0.0
+        for _ in range(n_calls):
+            total += float(fitness_fn(dict(cand)))
+            evals_used += 1
+        fit = total / n_calls
+        if best_genes is None or fit > best_fitness:
+            best_fitness = fit
+            best_genes = dict(cand)
+        history.append(
+            {
+                "run_seed": seed,
+                "eval_step": step,
+                "evals_total": evals_used,
+                "candidate_fitness": float(fit),
+                "best_fitness": float(best_fitness),
+                **{k: best_genes[k] for k in eff_bounds},
+            }
+        )
+        step += 1
+
+    assert best_genes is not None
+    if return_history:
+        return dict(best_genes), float(best_fitness), history
+    return dict(best_genes), float(best_fitness)
+
+
+def synthetic_fitness(
+    genes: Mapping[str, float | int],
+    noise_std: float = 0.0,
+    rng: random.Random | None = None,
+) -> float:
+    """
+    Автономний гладкий ландшафт пристосованості у [0, 1] з відомим максимумом
+    (block_size=36, compression_threshold=0.28, priority_weight=6.5, Q=0.85)
+    для незалежного тестування ГА окремо від конвеєра.
+    """
+    b = float(genes["block_size"])
+    c = float(genes["compression_threshold"])
+    p = float(genes["priority_weight"])
+
+    d_b = (b - 36.0) / 24.0
+    d_c = (c - 0.28) / 0.35
+    d_p = (p - 6.5) / 4.0
+
+    q = 0.85 - 0.12 * (d_b * d_b) - 0.10 * (d_c * d_c) - 0.11 * (d_p * d_p) - 0.03 * d_b * d_c
+    if noise_std > 0.0:
+        eff_rng = rng if rng is not None else random.Random(0)
+        q += eff_rng.gauss(0.0, noise_std)
+    return float(max(0.0, min(1.0, q)))
+
+
+def synthetic_scenario_seed_q(
+    genes: Mapping[str, float | int],
+    scenario: str = "робочий",
+    seed: int = 11,
+    fixed_compute_time_s: float | None = 0.15,
+    timing_noise_std: float = 0.0,
+    rng: random.Random | None = None,
+) -> float:
+    """
+    Автономна модель Q = 0.5*S + 0.35*R + 0.15*T за сценаріями й seed каналу (§3.1, §3.3, §3.4):
+    - у сценарії 'спокійний' завжди R = 1.0 незалежно від priority_weight;
+    - при fixed_compute_time_s != None час обчислень фіксований (детермінований T).
+    """
+    if scenario not in ("спокійний", "робочий", "аварійний"):
+        raise ValueError(f"Невідомий сценарій каналу: {scenario!r}")
+    if seed == FORBIDDEN_CHANNEL_SEED:
+        raise ValueError(f"Відкритий seed {FORBIDDEN_CHANNEL_SEED} заборонено використовувати")
+
+    b = float(genes["block_size"])
+    c = float(genes["compression_threshold"])
+    p = float(genes["priority_weight"])
+
+    s = (
+        0.62
+        - 0.14 * ((b - 40.0) / 24.0) ** 2
+        - 0.16 * (max(0.0, 0.25 - c) ** 2)
+        - 0.12 * (max(0.0, c - 0.35) ** 2)
+        - 0.03 * ((b - 40.0) / 24.0) * (c - 0.30)
+    )
+    s = max(0.0, min(1.0, s))
+
+    seed_shift = ((int(seed) * 37) % 11 - 5) * 0.004
+    if scenario == "спокійний":
+        r = 1.0
+    elif scenario == "робочий":
+        r = 0.96 - 0.04 * ((p - 6.0) / 6.0) ** 2 - 0.02 * ((b - 36.0) / 28.0) ** 2 + 0.5 * seed_shift
+    else:  # аварійний
+        r = 0.88 - 0.22 * ((p - 6.5) / 6.5) ** 2 - 0.08 * ((b - 32.0) / 32.0) ** 2 + seed_shift
+    r = max(0.0, min(1.0, r))
+    if r == 0.0:
+        return 0.0
+
+    t_ref = 20.0
+    if fixed_compute_time_s is not None:
+        t_exec = max(0.0, float(fixed_compute_time_s))
+    else:
+        eff_rng = rng if rng is not None else random.Random()
+        t_exec = max(0.001, 0.15 + eff_rng.gauss(0.0, timing_noise_std))
+    t_comp = t_ref / (t_ref + t_exec)
+
+    return float(0.5 * s + 0.35 * r + 0.15 * t_comp)
+
+
+def build_fitness_evaluator(
+    scenario_seed_fn: Callable[..., float] = synthetic_scenario_seed_q,
+    scenarios: Sequence[str] = DEFAULT_TRAIN_SCENARIOS,
+    seeds: Sequence[int] = DEFAULT_TRAIN_SEEDS,
+    fixed_compute_time_s: float | None = 0.15,
+    timing_noise_std: float = 0.0,
+    rng: random.Random | None = None,
+) -> Callable[[dict[str, int | float]], float]:
+    """Створює функцію пристосованості як середнє Q по заданих сценаріях і seed каналу."""
+    if not scenarios or not seeds:
+        raise ValueError("Списки сценаріїв і seed не можуть бути порожніми")
+    if FORBIDDEN_CHANNEL_SEED in set(seeds):
+        raise ValueError(f"Відкритий seed {FORBIDDEN_CHANNEL_SEED} заборонено у фітнес-оцінці")
+
+    eff_scenarios = tuple(scenarios)
+    eff_seeds = tuple(seeds)
+
+    def _fitness(genes: dict[str, int | float]) -> float:
+        total = 0.0
+        for sc in eff_scenarios:
+            for sd in eff_seeds:
+                total += float(
+                    scenario_seed_fn(
+                        genes,
+                        scenario=sc,
+                        seed=sd,
+                        fixed_compute_time_s=fixed_compute_time_s,
+                        timing_noise_std=timing_noise_std,
+                        rng=rng,
+                    )
+                )
+        return total / (len(eff_scenarios) * len(eff_seeds))
+
+    return _fitness
+
+
+def evaluate_train_and_val(
+    genes: Mapping[str, int | float],
+    scenario_seed_fn: Callable[..., float] = synthetic_scenario_seed_q,
+    train_scenarios: Sequence[str] = DEFAULT_TRAIN_SCENARIOS,
+    train_seeds: Sequence[int] = DEFAULT_TRAIN_SEEDS,
+    val_scenarios: Sequence[str] = DEFAULT_VAL_SCENARIOS,
+    val_seeds: Sequence[int] = DEFAULT_VAL_SEEDS,
+    fixed_compute_time_s: float | None = 0.15,
+) -> dict[str, float]:
+    """Оцінює хромосому на train і val (усі 3 сценарії), рахуючи `gap_train_minus_val`."""
+    validate_seed_split(train_seeds, val_seeds)
+    genes_copy = dict(genes)
+
+    train_eval = build_fitness_evaluator(
+        scenario_seed_fn=scenario_seed_fn,
+        scenarios=train_scenarios,
+        seeds=train_seeds,
+        fixed_compute_time_s=fixed_compute_time_s,
+        timing_noise_std=0.0,
+    )
+    train_q = float(train_eval(genes_copy))
+
+    result: dict[str, float] = {"train_q": train_q}
+    val_scores: list[float] = []
+    for sc in val_scenarios:
+        sc_eval = build_fitness_evaluator(
+            scenario_seed_fn=scenario_seed_fn,
+            scenarios=(sc,),
+            seeds=val_seeds,
+            fixed_compute_time_s=fixed_compute_time_s,
+            timing_noise_std=0.0,
+        )
+        sc_q = float(sc_eval(genes_copy))
+        result[f"val_q_{sc}"] = sc_q
+        val_scores.append(sc_q)
+
+    val_q = float(sum(val_scores) / len(val_scores))
+    result["val_q"] = val_q
+    result["gap_train_minus_val"] = train_q - val_q
+    return result
+
+
+def extract_best_so_far_curve(
+    history: Sequence[Mapping[str, object]],
+) -> list[tuple[int, float]]:
+    """Витягує монотонну криву `(evals_total, best_so_far)` із журналу ГА або Random Search."""
+    curve: list[tuple[int, float]] = []
+    running_best = float("-inf")
+    for row in history:
+        fit = float(row["best_fitness"])
+        if fit > running_best:
+            running_best = fit
+        curve.append((int(row["evals_total"]), running_best))
+    return curve
