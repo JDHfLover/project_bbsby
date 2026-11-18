@@ -51,18 +51,41 @@ def classify_frames(frames: list[TelemetryFrame]) -> list[int]:
     return classes
 
 
+CLASS_TO_PRIO_KEY = {0: "норма", 1: "аномалія", 2: "перехідний_режим"}
+DEFAULT_PRIORITIES = {
+    "норма": 1,
+    "аномалія": 5,
+    "перехідний_режим": 3,
+    "critical_бонус": 5,
+}
+
+
+def _resolve_class_priority(prio_cfg: dict, cls: int) -> int:
+    cls_int = int(cls)
+    key = CLASS_TO_PRIO_KEY.get(cls_int)
+    if key is not None and key in prio_cfg:
+        return int(prio_cfg[key])
+    if cls_int == 2 and "перехідний режим" in prio_cfg:
+        return int(prio_cfg["перехідний режим"])
+    if str(cls_int) in prio_cfg:
+        return int(prio_cfg[str(cls_int)])
+    if cls_int in prio_cfg:
+        return int(prio_cfg[cls_int])
+    raise ValueError(f"Невідомий клас кадру або відсутній пріоритет: {cls}")
+
+
 def compute_frame_values(
     frames: list[TelemetryFrame], classes: list[int], config: dict
 ) -> list[int]:
     """
-    Обчислює цінність кадру за Розділом 3.5 FORMAT_SPEC_1.md:
+    Обчислює цінність кадру за Розділом 3.5 FORMAT_SPEC_1.md і team/team_config.json:
     v_i = пріоритет(клас_i) + critical_бонус * [critical_i == 1]
     """
-    prio_cfg = config.get("пріоритети_кадрів", {"0": 10, "1": 50, "2": 25, "critical_бонус": 100})
-    crit_bonus = int(prio_cfg.get("critical_бонус", 100))
+    prio_cfg = config.get("пріоритети_кадрів", DEFAULT_PRIORITIES)
+    crit_bonus = int(prio_cfg.get("critical_бонус", 5))
     values = []
     for frame, cls in zip(frames, classes):
-        base_p = int(prio_cfg.get(str(cls), prio_cfg.get(cls, 10)))
+        base_p = _resolve_class_priority(prio_cfg, cls)
         val = base_p + (crit_bonus if frame.critical == 1 else 0)
         values.append(val)
     return values
