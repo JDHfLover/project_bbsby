@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Автономний дослідницький скрипт для гілки `ga` (`artifacts/design/ga.md`):
+Дослідницький скрипт для гілки `ga` (`artifacts/design/ga.md`):
+- бекенди: `table` (сітка на реальному конвеєрі, типовий), `pipeline` (живий конвеєр), `synthetic`;
 - групи: sens, noise, compare, crossover, mutation, tournament, elitism, pop_gen;
 - навчальний фітнес: сценарії ('робочий', 'аварійний') x seed (11, 12);
 - валідація: сценарії ('спокійний', 'робочий', 'аварійний') x seed (21..25);
 - 10 запусків ГА vs 10 запусків Random Search (seed = 0..9, бюджет 200);
-- збереження results/ga_history.csv, results/best_params.json,
+- фінальна перевірка знайденої хромосоми наживо через `call_pipeline`;
+- збереження results/ga_pipeline_table.json, results/ga_history.csv, results/best_params.json,
   results/ga_study_sensitivity_summary.csv, results/ga_study_compare.csv, results/ga_study_curves.csv.
 """
 from __future__ import annotations
@@ -18,6 +20,8 @@ import random
 import statistics
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -29,14 +33,21 @@ from src.ga import (
     DEFAULT_VAL_SCENARIOS,
     DEFAULT_VAL_SEEDS,
     GENE_BOUNDS,
+    PipelineGridTable,
     build_fitness_evaluator,
+    build_pipeline_grid_table,
+    call_pipeline,
     evaluate_train_and_val,
     extract_best_so_far_curve,
     get_default_hyperparams,
+    get_default_pipeline_context,
+    load_pipeline_grid_table,
     optimize_with_ga,
     optimize_with_random_search,
+    parse_bounds_spec,
     save_best_params_json,
     save_ga_history_csv,
+    save_pipeline_grid_table,
     synthetic_scenario_seed_q,
     validate_seed_split,
 )
@@ -52,57 +63,147 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]])
         writer.writerows(rows)
 
 
-def run_sensitivity_study(out_csv: Path, timing_noise_std: float) -> list[dict[str, object]]:
+def _measure_pipeline_noise_times(
+    base_genes: Mapping[str, int | float],
+    samples: int = 15,
+) -> tuple[list[float], float]:
+    """Виконує `samples` прогонів базової хромосоми на реальному конвеєрі для виміру шуму T."""
+    ctx = get_default_pipeline_context()
+    ctx._ensure_loaded()
+    compute_times: list[float] = []
+    q_vals: list[float] = []
+    for _ in range(samples):
+        bundle = ctx.pack_and_decode(base_genes)
+        m = ctx.evaluate_packed_on_channel(bundle, scenario="аварійний", seed=DEFAULT_VAL_SEEDS[0])
+        compute_times.append(float(m["compute_time_s"]))
+        q_vals.append(float(m["Q"]))
+    noise_std = float(statistics.stdev(q_vals)) if len(q_vals) >= 2 else 0.0
+    return compute_times, noise_std
+
+
+def run_sensitivity_study(
+    out_csv: Path,
+    backend: str,
+    timing_noise_std: float,
+    bounds: Mapping[str, tuple[float | int, float | int, str]],
+    measured_compute_times_s: Sequence[float] = (),
+) -> tuple[list[dict[str, object]], float]:
     """Група `sens`: вимірює noise_std від T та розмах Q кожного гена в усіх 3 сценаріях."""
-    base = get_default_hyperparams()
     rows: list[dict[str, object]] = []
+    eff_noise_summary = 0.0
 
-    for sc in DEFAULT_VAL_SCENARIOS:
-        noise_rng = random.Random(100)
-        noisy_eval = build_fitness_evaluator(
-            scenario_seed_fn=synthetic_scenario_seed_q,
-            scenarios=(sc,),
-            seeds=(21,),
-            fixed_compute_time_s=None,
-            timing_noise_std=timing_noise_std,
-            rng=noise_rng,
-        )
-        noise_samples = [noisy_eval(base) for _ in range(15)]
-        noise_std = statistics.stdev(noise_samples)
-
-        det_eval = build_fitness_evaluator(
-            scenario_seed_fn=synthetic_scenario_seed_q,
-            scenarios=(sc,),
-            seeds=DEFAULT_VAL_SEEDS,
-            fixed_compute_time_s=0.15,
-        )
-        for gene_name, (lo, hi, kind) in GENE_BOUNDS.items():
-            vals: list[float] = []
-            for step in range(7):
-                frac = step / 6.0
-                cand = dict(base)
-                raw_v = float(lo) + frac * (float(hi) - float(lo))
-                cand[gene_name] = int(round(raw_v)) if kind == "int" else raw_v
-                vals.append(float(det_eval(cand)))
-            q_range = max(vals) - min(vals)
-            rows.append(
-                {
-                    "scenario": sc,
-                    "gene": gene_name,
-                    "noise_std": f"{noise_std:.6f}",
-                    "min_q": f"{min(vals):.6f}",
-                    "max_q": f"{max(vals):.6f}",
-                    "range_q": f"{q_range:.6f}",
-                    "ratio_over_noise": f"{(q_range / noise_std) if noise_std > 0 else float('inf'):.2f}",
-                }
+    if backend == "synthetic":
+        base = get_default_hyperparams()
+        for sc in DEFAULT_VAL_SCENARIOS:
+            noise_rng = random.Random(100)
+            noisy_eval = build_fitness_evaluator(
+                scenario_seed_fn=synthetic_scenario_seed_q,
+                scenarios=(sc,),
+                seeds=(DEFAULT_VAL_SEEDS[0],),
+                fixed_compute_time_s=None,
+                timing_noise_std=timing_noise_std,
+                rng=noise_rng,
             )
+            noise_samples = [noisy_eval(base) for _ in range(15)]
+            noise_std = statistics.stdev(noise_samples)
+            eff_noise_summary = max(eff_noise_summary, noise_std)
+
+            det_eval = build_fitness_evaluator(
+                scenario_seed_fn=synthetic_scenario_seed_q,
+                scenarios=(sc,),
+                seeds=DEFAULT_VAL_SEEDS,
+                fixed_compute_time_s=0.15,
+            )
+            for gene_name, (lo, hi, kind) in bounds.items():
+                vals: list[float] = []
+                for step in range(7):
+                    frac = step / 6.0
+                    cand = dict(base)
+                    raw_v = float(lo) + frac * (float(hi) - float(lo))
+                    cand[gene_name] = int(round(raw_v)) if kind == "int" else raw_v
+                    vals.append(float(det_eval(cand)))
+                q_range = max(vals) - min(vals)
+                rows.append(
+                    {
+                        "scenario": sc,
+                        "gene": gene_name,
+                        "noise_std": f"{noise_std:.6f}",
+                        "min_q": f"{min(vals):.6f}",
+                        "max_q": f"{max(vals):.6f}",
+                        "range_q": f"{q_range:.6f}",
+                        "ratio_over_noise": f"{(q_range / noise_std) if noise_std > 0 else float('inf'):.2f}",
+                    }
+                )
+    else:
+        ctx = get_default_pipeline_context()
+        ctx._ensure_loaded()
+        base = get_default_hyperparams(ctx.config)
+        # Заповнюємо можливі додаткові гени з custom bounds серединами діапазону
+        for g_name, (lo, hi, kind) in bounds.items():
+            if g_name not in base:
+                mid = 0.5 * (float(lo) + float(hi))
+                base[g_name] = int(round(mid)) if kind == "int" else mid
+
+        compute_times = list(measured_compute_times_s)
+        if len(compute_times) < 2:
+            compute_times, _ = _measure_pipeline_noise_times(base, samples=15)
+        median_t = float(statistics.median(compute_times)) if compute_times else 0.15
+
+        # Пакетний кеш лише в межах цього циклу чутливості для 19 унікальних точок (7*3 - 2 повтори base)
+        bundles_by_point: dict[tuple[tuple[str, float | int], ...], object] = {}
+
+        def _get_bundle(cand_genes: dict[str, int | float]):
+            key = tuple((k, cand_genes[k]) for k in sorted(cand_genes))
+            if key not in bundles_by_point:
+                bundles_by_point[key] = ctx.pack_and_decode(cand_genes)
+            return bundles_by_point[key]
+
+        base_bundle = _get_bundle(base)
+
+        for sc in DEFAULT_VAL_SCENARIOS:
+            noise_q_vals = [
+                ctx.evaluate_packed_on_channel(
+                    base_bundle, scenario=sc, seed=DEFAULT_VAL_SEEDS[0], fixed_compute_time_s=t_val
+                )["Q"]
+                for t_val in compute_times
+            ]
+            noise_std = statistics.stdev(noise_q_vals) if len(noise_q_vals) >= 2 else 0.0
+            eff_noise_summary = max(eff_noise_summary, noise_std)
+
+            for gene_name, (lo, hi, kind) in bounds.items():
+                vals = []
+                for step in range(7):
+                    frac = step / 6.0
+                    cand = dict(base)
+                    raw_v = float(lo) + frac * (float(hi) - float(lo))
+                    cand[gene_name] = int(round(raw_v)) if kind == "int" else raw_v
+                    bundle = _get_bundle(cand)
+                    q_seeds = [
+                        ctx.evaluate_packed_on_channel(
+                            bundle, scenario=sc, seed=sd, fixed_compute_time_s=median_t
+                        )["Q"]
+                        for sd in DEFAULT_VAL_SEEDS
+                    ]
+                    vals.append(float(statistics.mean(q_seeds)))
+                q_range = max(vals) - min(vals)
+                rows.append(
+                    {
+                        "scenario": sc,
+                        "gene": gene_name,
+                        "noise_std": f"{noise_std:.6f}",
+                        "min_q": f"{min(vals):.6f}",
+                        "max_q": f"{max(vals):.6f}",
+                        "range_q": f"{q_range:.6f}",
+                        "ratio_over_noise": f"{(q_range / noise_std) if noise_std > 0 else float('inf'):.2f}",
+                    }
+                )
 
     _write_csv(
         out_csv,
         ["scenario", "gene", "noise_std", "min_q", "max_q", "range_q", "ratio_over_noise"],
         rows,
     )
-    return rows
+    return rows, eff_noise_summary
 
 
 def _summarize_runs(
@@ -112,8 +213,11 @@ def _summarize_runs(
     budget: int,
     algo_kind: str,
     ga_kwargs: dict[str, object],
+    scenario_seed_fn: Callable[..., float],
+    bounds: Mapping[str, tuple[float | int, float | int, str]],
     fixed_compute_time_s: float | None,
     timing_noise_std: float,
+    val_fixed_compute_time_s: float | None,
 ) -> tuple[dict[str, object], list[float], list[list[tuple[int, float]]], list[dict[str, object]], tuple[dict[str, int | float], float, int]]:
     train_vals: list[float] = []
     val_vals: list[float] = []
@@ -128,7 +232,7 @@ def _summarize_runs(
     for seed in range(runs):
         train_rng = random.Random(10_000 + seed)
         fitness_fn = build_fitness_evaluator(
-            scenario_seed_fn=synthetic_scenario_seed_q,
+            scenario_seed_fn=scenario_seed_fn,
             scenarios=DEFAULT_TRAIN_SCENARIOS,
             seeds=DEFAULT_TRAIN_SEEDS,
             fixed_compute_time_s=fixed_compute_time_s,
@@ -140,6 +244,7 @@ def _summarize_runs(
                 fitness_fn,
                 budget=budget,
                 seed=seed,
+                bounds=bounds,
                 eval_repeats=int(ga_kwargs.get("eval_repeats", 1)),
                 return_history=True,
             )
@@ -148,13 +253,18 @@ def _summarize_runs(
                 fitness_fn,
                 budget=budget,
                 seed=seed,
+                bounds=bounds,
                 return_history=True,
                 **ga_kwargs,  # type: ignore[arg-type]
             )
         history_rows.extend(hist)
         curves.append(extract_best_so_far_curve(hist))
 
-        ev = evaluate_train_and_val(genes, fixed_compute_time_s=0.15)
+        ev = evaluate_train_and_val(
+            genes,
+            scenario_seed_fn=scenario_seed_fn,
+            fixed_compute_time_s=val_fixed_compute_time_s,
+        )
         train_vals.append(ev["train_q"])
         val_vals.append(ev["val_q"])
         gaps.append(ev["gap_train_minus_val"])
@@ -192,23 +302,76 @@ def _step_curve_value(curve: list[tuple[int, float]], budget_pt: int) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("synthetic",), default="synthetic")
+    parser.add_argument("--backend", choices=("table", "pipeline", "synthetic"), default="table")
+    parser.add_argument("--build-table", action="store_true", help="Перебудувати сітку реального конвеєра")
+    parser.add_argument("--table-path", default="results/ga_pipeline_table.json")
+    parser.add_argument("--bounds", default=None, help="Межі генів, напр. block_size=16:64:int,...")
     parser.add_argument("--groups", default=",".join(ALL_GROUPS))
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--budget", type=int, default=200)
-    parser.add_argument("--fixed-time", type=float, default=0.15)
-    parser.add_argument("--timing-noise-std", type=float, default=0.05)
+    parser.add_argument("--fixed-time", type=float, default=None)
+    parser.add_argument("--timing-noise-std", type=float, default=None)
     args = parser.parse_args()
 
     validate_seed_split(DEFAULT_TRAIN_SEEDS, DEFAULT_VAL_SEEDS)
+    eff_bounds = parse_bounds_spec(args.bounds)
     groups = {g.strip() for g in args.groups.split(",") if g.strip()}
     results_dir = REPO_ROOT / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    if "sens" in groups:
-        sens_rows = run_sensitivity_study(
-            results_dir / "ga_study_sensitivity_summary.csv", args.timing_noise_std
+    table_path = Path(args.table_path)
+    if not table_path.is_absolute():
+        table_path = REPO_ROOT / table_path
+
+    grid_table: PipelineGridTable | None = None
+    measured_compute_times_s: list[float] = []
+    measured_noise_std = 0.0
+    single_eval_time_s = 0.0
+
+    if args.backend == "table":
+        if args.build_table or not table_path.exists():
+            print(f"Побудова 3D-сітки реального конвеєра -> {table_path} ...")
+            grid_table = build_pipeline_grid_table()
+            save_pipeline_grid_table(grid_table, table_path)
+            print(
+                f"Таблиця побудована за {grid_table.build_total_s:.2f} с "
+                f"(single_eval_time_s={grid_table.single_eval_time_s:.3f} с, "
+                f"measured_noise_std={grid_table.measured_noise_std:.6f}, "
+                f"timing_noise_std={grid_table.measured_timing_noise_std:.4f} с)."
+            )
+        else:
+            grid_table = load_pipeline_grid_table(table_path)
+        scenario_seed_fn: Callable[..., float] = grid_table.scenario_seed_q
+        measured_compute_times_s = list(grid_table.measured_compute_times_s)
+        measured_noise_std = grid_table.measured_noise_std
+        single_eval_time_s = grid_table.single_eval_time_s
+        eff_fixed_time = args.fixed_time  # None = реальний виміряний tx+rx (детерміновано без шуму)
+        eff_timing_noise = (
+            float(args.timing_noise_std)
+            if args.timing_noise_std is not None
+            else (grid_table.measured_timing_noise_std or 0.05)
         )
+    elif args.backend == "pipeline":
+        scenario_seed_fn = call_pipeline
+        eff_fixed_time = args.fixed_time
+        eff_timing_noise = float(args.timing_noise_std) if args.timing_noise_std is not None else 0.05
+    else:
+        scenario_seed_fn = synthetic_scenario_seed_q
+        eff_fixed_time = 0.15 if args.fixed_time is None else float(args.fixed_time)
+        eff_timing_noise = 0.05 if args.timing_noise_std is None else float(args.timing_noise_std)
+
+    val_fixed_time = eff_fixed_time if args.backend != "synthetic" else (0.15 if args.fixed_time is None else float(args.fixed_time))
+
+    if "sens" in groups:
+        sens_rows, sens_noise = run_sensitivity_study(
+            results_dir / "ga_study_sensitivity_summary.csv",
+            backend=args.backend,
+            timing_noise_std=eff_timing_noise,
+            bounds=eff_bounds,
+            measured_compute_times_s=measured_compute_times_s,
+        )
+        if measured_noise_std == 0.0:
+            measured_noise_std = sens_noise
         print("== Група sens (розмах Q по сценаріях і відношення до шуму T) ==")
         for r in sens_rows:
             print(
@@ -220,43 +383,43 @@ def main() -> int:
     if "compare" in groups:
         compare_configs.extend(
             [
-                ("compare", "ga_baseline", "ga", {"pop_size": 20, "elitism": 2}, args.fixed_time, 0.0),
-                ("compare", "random_search", "random", {}, args.fixed_time, 0.0),
+                ("compare", "ga_baseline", "ga", {"pop_size": 20, "elitism": 2}, eff_fixed_time, 0.0),
+                ("compare", "random_search", "random", {}, eff_fixed_time, 0.0),
             ]
         )
     if "noise" in groups:
         compare_configs.extend(
             [
-                ("noise", "ga_keep_elite_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "reevaluate_elite": False}, None, args.timing_noise_std),
-                ("noise", "ga_reeval_elite_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "reevaluate_elite": True}, None, args.timing_noise_std),
-                ("noise", "ga_avg2_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "eval_repeats": 2}, None, args.timing_noise_std),
+                ("noise", "ga_keep_elite_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "reevaluate_elite": False}, None, eff_timing_noise),
+                ("noise", "ga_reeval_elite_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "reevaluate_elite": True}, None, eff_timing_noise),
+                ("noise", "ga_avg2_noisy_T", "ga", {"pop_size": 20, "elitism": 2, "eval_repeats": 2}, None, eff_timing_noise),
             ]
         )
     if "crossover" in groups:
         compare_configs.extend(
             [
-                ("crossover", "ga_single_point", "ga", {"pop_size": 20, "elitism": 2, "crossover_kind": "single_point"}, args.fixed_time, 0.0),
-                ("crossover", "ga_arithmetic", "ga", {"pop_size": 20, "elitism": 2, "crossover_kind": "arithmetic"}, args.fixed_time, 0.0),
+                ("crossover", "ga_single_point", "ga", {"pop_size": 20, "elitism": 2, "crossover_kind": "single_point"}, eff_fixed_time, 0.0),
+                ("crossover", "ga_arithmetic", "ga", {"pop_size": 20, "elitism": 2, "crossover_kind": "arithmetic"}, eff_fixed_time, 0.0),
             ]
         )
     if "mutation" in groups:
         compare_configs.extend(
             [
-                ("mutation", "ga_mut_0.1", "ga", {"pop_size": 20, "elitism": 2, "mutation_rate": 0.1}, args.fixed_time, 0.0),
-                ("mutation", "ga_mut_0.4", "ga", {"pop_size": 20, "elitism": 2, "mutation_rate": 0.4}, args.fixed_time, 0.0),
+                ("mutation", "ga_mut_0.1", "ga", {"pop_size": 20, "elitism": 2, "mutation_rate": 0.1}, eff_fixed_time, 0.0),
+                ("mutation", "ga_mut_0.4", "ga", {"pop_size": 20, "elitism": 2, "mutation_rate": 0.4}, eff_fixed_time, 0.0),
             ]
         )
     if "tournament" in groups:
         compare_configs.append(
-            ("tournament", "ga_k_5", "ga", {"pop_size": 20, "elitism": 2, "tournament_k": 5}, args.fixed_time, 0.0)
+            ("tournament", "ga_k_5", "ga", {"pop_size": 20, "elitism": 2, "tournament_k": 5}, eff_fixed_time, 0.0)
         )
     if "elitism" in groups:
         compare_configs.append(
-            ("elitism", "ga_elite_4", "ga", {"pop_size": 20, "elitism": 4}, args.fixed_time, 0.0)
+            ("elitism", "ga_elite_4", "ga", {"pop_size": 20, "elitism": 4}, eff_fixed_time, 0.0)
         )
     if "pop_gen" in groups:
         compare_configs.append(
-            ("pop_gen", "ga_pop_10", "ga", {"pop_size": 10, "elitism": 2}, args.fixed_time, 0.0)
+            ("pop_gen", "ga_pop_10", "ga", {"pop_size": 10, "elitism": 2}, eff_fixed_time, 0.0)
         )
 
     summaries: list[dict[str, object]] = []
@@ -267,7 +430,17 @@ def main() -> int:
 
     for grp, cfg_name, algo_kind, ga_kw, fix_t, t_noise in compare_configs:
         summary, val_scores, curves, hist_rows, best_bundle = _summarize_runs(
-            grp, cfg_name, args.runs, args.budget, algo_kind, ga_kw, fix_t, t_noise
+            grp,
+            cfg_name,
+            args.runs,
+            args.budget,
+            algo_kind,
+            ga_kw,
+            scenario_seed_fn,
+            eff_bounds,
+            fix_t,
+            t_noise,
+            val_fixed_time,
         )
         summaries.append(summary)
         runs_val_by_cfg[cfg_name] = val_scores
@@ -276,7 +449,6 @@ def main() -> int:
             ga_history_all = hist_rows
             best_ga_bundle = best_bundle
 
-    # Обчислення Δ і Δ/SE відносно random_search (коли random_search у запуску)
     rs_scores = runs_val_by_cfg.get("random_search", [])
     rs_mean = statistics.mean(rs_scores) if rs_scores else 0.0
     rs_var = (statistics.variance(rs_scores) / len(rs_scores)) if len(rs_scores) > 1 else 0.0
@@ -344,8 +516,27 @@ def main() -> int:
 
     if ga_history_all and best_ga_bundle is not None:
         best_genes, best_val, best_seed = best_ga_bundle
-        save_ga_history_csv(ga_history_all, results_dir / "ga_history.csv")
-        val_detail = evaluate_train_and_val(best_genes, fixed_compute_time_s=0.15)
+        save_ga_history_csv(ga_history_all, results_dir / "ga_history.csv", gene_names=list(eff_bounds.keys()))
+        val_detail = evaluate_train_and_val(
+            best_genes,
+            scenario_seed_fn=scenario_seed_fn,
+            fixed_compute_time_s=val_fixed_time,
+        )
+
+        # Обов'язкова перевірка знайденої хромосоми наживо на реальному конвеєрі (§3.5 design/ga.md)
+        live_detail = evaluate_train_and_val(
+            best_genes,
+            scenario_seed_fn=call_pipeline,
+            fixed_compute_time_s=None,
+        )
+        eff_single_eval_s = (
+            single_eval_time_s
+            if single_eval_time_s > 0.0
+            else float(live_detail.get("single_eval_time_s", 0.0))
+        )
+        if measured_noise_std == 0.0:
+            _, measured_noise_std = _measure_pipeline_noise_times(best_genes, samples=15)
+
         res = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=REPO_ROOT,
@@ -355,25 +546,38 @@ def main() -> int:
         )
         commit_hash = res.stdout.strip() if res.returncode == 0 else "unknown"
         ga_scores = runs_val_by_cfg["ga_baseline"]
+        reported_val = float(live_detail["val_q"]) if args.backend != "synthetic" else float(best_val)
+
         save_best_params_json(
             best_genes,
-            best_val,
+            reported_val,
             results_dir / "best_params.json",
             seed=best_seed,
             extra={
                 "backend": args.backend,
+                "bounds": {k: list(v) for k, v in eff_bounds.items()},
                 "train_scenarios": list(DEFAULT_TRAIN_SCENARIOS),
                 "train_seeds": list(DEFAULT_TRAIN_SEEDS),
                 "val_scenarios": list(DEFAULT_VAL_SCENARIOS),
                 "val_seeds": list(DEFAULT_VAL_SEEDS),
                 **val_detail,
+                "pipeline_train_q": float(live_detail["train_q"]),
+                "pipeline_val_q": float(live_detail["val_q"]),
+                "pipeline_val_q_спокійний": float(live_detail["val_q_спокійний"]),
+                "pipeline_val_q_робочий": float(live_detail["val_q_робочий"]),
+                "pipeline_val_q_аварійний": float(live_detail["val_q_аварійний"]),
+                "single_eval_time_s": float(eff_single_eval_s),
+                "measured_noise_std": float(measured_noise_std),
                 "ga_val_mean": statistics.mean(ga_scores),
                 "ga_val_std": statistics.stdev(ga_scores) if len(ga_scores) > 1 else 0.0,
                 "commit": commit_hash,
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             },
         )
-        print(f"\nНайкраща хромосома (seed={best_seed}): {best_genes}, val_Q={best_val:.6f}")
+        print(
+            f"\nНайкраща хромосома (seed={best_seed}): {best_genes}, "
+            f"surrogate_val_Q={best_val:.6f}, live_pipeline_val_Q={live_detail['val_q']:.6f}"
+        )
 
     return 0
 

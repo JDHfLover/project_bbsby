@@ -1,12 +1,29 @@
 {
   "best_genes": {
-    "block_size": 39,
-    "compression_threshold": 0.3607027491963896,
-    "priority_weight": 6.405898990911054
+    "block_size": 36,
+    "compression_threshold": 0.926506623785866,
+    "priority_weight": 0.0
   },
-  "best_fitness": 0.7889261098679959,
-  "seed": 3,
-  "backend": "synthetic",
+  "best_fitness": 0.6964262189603682,
+  "seed": 1,
+  "backend": "table",
+  "bounds": {
+    "block_size": [
+      16,
+      64,
+      "int"
+    ],
+    "compression_threshold": [
+      0.0,
+      1.0,
+      "float"
+    ],
+    "priority_weight": [
+      0.0,
+      10.0,
+      "float"
+    ]
+  },
   "train_scenarios": [
     "робочий",
     "аварійний"
@@ -27,14 +44,21 @@
     24,
     25
   ],
-  "train_q": 0.7768927082020566,
-  "val_q_спокійний": 0.8087929131998746,
-  "val_q_робочий": 0.7939484850605864,
-  "val_q_аварійний": 0.7640369313435268,
-  "val_q": 0.7889261098679959,
-  "gap_train_minus_val": -0.012033401665939358,
-  "ga_val_mean": 0.788899710756265,
-  "ga_val_std": 2.7499125551268748e-05,
-  "commit": "d3c53a5",
-  "timestamp": "2026-11-18T02:03:46.269890+00:00"
+  "train_q": 0.6716290077263132,
+  "val_q_спокійний": 0.7305555864344819,
+  "val_q_робочий": 0.7233285507279217,
+  "val_q_аварійний": 0.6357856138541471,
+  "val_q": 0.6965565836721836,
+  "gap_train_minus_val": -0.024927575945870473,
+  "pipeline_train_q": 0.6714965928949195,
+  "pipeline_val_q": 0.6964262189603682,
+  "pipeline_val_q_спокійний": 0.7304279606271928,
+  "pipeline_val_q_робочий": 0.7232001701360791,
+  "pipeline_val_q_аварійний": 0.6356505261178323,
+  "single_eval_time_s": 0.8235904730835045,
+  "measured_noise_std": 0.00020756703115815833,
+  "ga_val_mean": 0.6964782976824141,
+  "ga_val_std": 8.904851086467197e-05,
+  "commit": "e0ed44d",
+  "timestamp": "2026-11-18T19:28:33.630211+00:00"
 }

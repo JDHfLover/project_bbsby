@@ -14,17 +14,23 @@ from src.ga import (
     DEFAULT_VAL_SEEDS,
     FORBIDDEN_CHANNEL_SEED,
     GENE_BOUNDS,
+    PipelineGridTable,
     build_fitness_evaluator,
+    build_pipeline_grid_table,
+    call_pipeline,
     crossover_chromosomes,
     evaluate_train_and_val,
     extract_best_so_far_curve,
     get_default_hyperparams,
+    load_pipeline_grid_table,
     mutate_chromosome,
     optimize_with_ga,
     optimize_with_random_search,
+    parse_bounds_spec,
     sample_random_chromosome,
     save_best_params_json,
     save_ga_history_csv,
+    save_pipeline_grid_table,
     synthetic_fitness,
     synthetic_scenario_seed_q,
     tournament_select,
@@ -260,3 +266,90 @@ def test_scenario_evaluator_fixed_t_and_calm_invariance():
     assert {"train_q", "val_q", "gap_train_minus_val", "val_q_спокійний", "val_q_робочий", "val_q_аварійний"} <= summary.keys()
     assert summary["val_q"] > 0.70
     assert extract_best_so_far_curve(hist)[-1][0] == 200
+
+
+def test_real_pipeline_adapter_and_grid_table_integration(tmp_path: Path):
+    """8. Інтеграція call_pipeline, parse_bounds_spec і 3D-сітки реального конвеєра (§3.1–3.5)."""
+    assert parse_bounds_spec(None) == GENE_BOUNDS
+    partial = parse_bounds_spec("block_size=20:48:int")
+    assert partial["block_size"] == (20, 48, "int")
+    assert partial["compression_threshold"] == GENE_BOUNDS["compression_threshold"]
+    with pytest.raises(ValueError):
+        parse_bounds_spec("bad_format")
+
+    defaults = get_default_hyperparams(
+        {"пакування": {"candidate_window_frames": 64}, "пріоритети_кадрів": {"critical_бонус": 5}}
+    )
+    assert defaults == {"block_size": 64, "compression_threshold": 0.0, "priority_weight": 5.0}
+
+    # Живий конвеєр працює на всіх 3 сценаріях і забороняє відкритий seed 425243
+    for sc in ("спокійний", "робочий", "аварійний"):
+        q_val = call_pipeline(defaults, scenario=sc, seed=21, fixed_compute_time_s=0.15)
+        assert 0.0 < q_val <= 1.0
+    with pytest.raises(ValueError):
+        call_pipeline(defaults, scenario="аварійний", seed=FORBIDDEN_CHANNEL_SEED)
+
+    # Перевірка чутливості на реальному конвеєрі: block_size=36 перевершує 64 в аварійному сценарії
+    q_b36 = call_pipeline(
+        {"block_size": 36, "compression_threshold": 0.0, "priority_weight": 5.0},
+        scenario="аварійний",
+        seed=11,
+        fixed_compute_time_s=0.15,
+    )
+    q_b64 = call_pipeline(defaults, scenario="аварійний", seed=11, fixed_compute_time_s=0.15)
+    assert q_b36 > q_b64
+
+    # Однократна пакетна оптимізація в build_fitness_evaluator(call_pipeline)
+    pipe_train_eval = build_fitness_evaluator(
+        scenario_seed_fn=call_pipeline,
+        scenarios=("робочий", "аварійний"),
+        seeds=(11, 12),
+        fixed_compute_time_s=None,
+    )
+    assert 0.0 < pipe_train_eval(defaults) <= 1.0
+
+    # Міні-сітка реального конвеєра: збереження/завантаження та ГА vs Random з рівним бюджетом
+    grid = build_pipeline_grid_table(
+        block_sizes=(24, 48),
+        compression_thresholds=(0.0, 0.5),
+        priority_weights=(0.0, 5.0),
+        scenarios=("спокійний", "робочий", "аварійний"),
+        seeds=(11, 12, 21, 22, 23, 24, 25),
+        noise_samples=0,
+    )
+    table_path = tmp_path / "mini_grid.json"
+    save_pipeline_grid_table(grid, table_path)
+    loaded = load_pipeline_grid_table(table_path)
+    assert isinstance(loaded, PipelineGridTable)
+
+    table_eval = build_fitness_evaluator(
+        scenario_seed_fn=loaded.scenario_seed_q,
+        scenarios=("робочий", "аварійний"),
+        seeds=(11, 12),
+        fixed_compute_time_s=None,
+    )
+    ga_calls = 0
+
+    def ga_counting_fn(genes):
+        nonlocal ga_calls
+        ga_calls += 1
+        return table_eval(genes)
+
+    ga_genes, ga_fit, ga_hist = optimize_with_ga(
+        ga_counting_fn, budget=40, pop_size=10, elitism=2, seed=0, return_history=True
+    )
+    assert ga_calls == 40
+    assert ga_hist[-1]["best_fitness"] >= ga_hist[0]["best_fitness"]
+    assert ga_fit == ga_hist[-1]["best_fitness"]
+    _assert_in_bounds(ga_genes)
+
+    rs_calls = 0
+
+    def rs_counting_fn(genes):
+        nonlocal rs_calls
+        rs_calls += 1
+        return table_eval(genes)
+
+    rs_genes, _, _ = optimize_with_random_search(rs_counting_fn, budget=40, seed=0, return_history=True)
+    assert rs_calls == 40
+    _assert_in_bounds(rs_genes)

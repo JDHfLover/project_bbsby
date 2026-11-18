@@ -1,11 +1,15 @@
-"""Модуль гілки `ga`: генетичний алгоритм, Random Search, межі генів і журнал еволюції."""
+"""Модуль гілки `ga`: генетичний алгоритм, Random Search, межі генів, журнал еволюції та адаптер конвеєра."""
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import os
 import random
+import statistics
+import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 GENE_BOUNDS: dict[str, tuple[float | int, float | int, str]] = {
@@ -22,18 +26,62 @@ DEFAULT_TRAIN_SEEDS: tuple[int, ...] = (11, 12)
 DEFAULT_VAL_SEEDS: tuple[int, ...] = (21, 22, 23, 24, 25)
 DEFAULT_TRAIN_SCENARIOS: tuple[str, ...] = ("робочий", "аварійний")
 DEFAULT_VAL_SCENARIOS: tuple[str, ...] = ("спокійний", "робочий", "аварійний")
+DEFAULT_GRID_BLOCK_SIZES: tuple[int, ...] = (16, 26, 36, 48, 64)
+DEFAULT_GRID_COMP_THRESHOLDS: tuple[float, ...] = (0.0, 0.35, 0.50, 0.90)
+DEFAULT_GRID_PRIORITY_WEIGHTS: tuple[float, ...] = (0.0, 5.0, 10.0)
 
 CROSSOVER_KINDS = ("uniform", "single_point", "arithmetic")
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def get_default_hyperparams(config: dict | None = None) -> dict[str, int | float]:
-    """Повертає базові параметри системи для вимірювання Q_baseline (Чекпоінт 1)."""
+    """Повертає базові параметри системи для вимірювання Q_baseline (§3.1–3.2 design/ga.md)."""
     pack_cfg = config.get("пакування", config) if isinstance(config, dict) else {}
+    prio_cfg = config.get("пріоритети_кадрів", {}) if isinstance(config, dict) else {}
     return {
         "block_size": int(pack_cfg.get("candidate_window_frames", 64)),
-        "compression_threshold": 0.98,
-        "priority_weight": 1.0,
+        "compression_threshold": float(pack_cfg.get("compression_threshold", 0.0)),
+        "priority_weight": float(prio_cfg.get("critical_бонус", 5.0)),
     }
+
+
+def parse_bounds_spec(
+    spec: str | None,
+) -> dict[str, tuple[float | int, float | int, str]]:
+    """
+    Розбирає рядок меж генів із CLI `--bounds`, наприклад:
+    `block_size=16:64:int,compression_threshold=0:1:float,priority_weight=0:10:float`.
+    """
+    if spec is None or not spec.strip():
+        return dict(GENE_BOUNDS)
+
+    parsed: dict[str, tuple[float | int, float | int, str]] = {}
+    for raw_item in spec.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Некоректний формат межі {item!r}; очікується name=lo:hi[:int|float]")
+        name, rhs = item.split("=", 1)
+        name = name.strip()
+        parts = [p.strip() for p in rhs.split(":")]
+        if len(parts) not in (2, 3):
+            raise ValueError(f"Некоректний діапазон для {name!r}: {rhs!r}")
+        kind = parts[2] if len(parts) == 3 else (GENE_BOUNDS[name][2] if name in GENE_BOUNDS else "float")
+        if kind not in ("int", "float"):
+            raise ValueError(f"Невідомий тип гена {name!r}: {kind!r}")
+        lo = int(round(float(parts[0]))) if kind == "int" else float(parts[0])
+        hi = int(round(float(parts[1]))) if kind == "int" else float(parts[1])
+        parsed[name] = (lo, hi, kind)
+
+    if not parsed:
+        return dict(GENE_BOUNDS)
+    if len(parsed) < len(GENE_BOUNDS) and all(k in GENE_BOUNDS for k in parsed):
+        merged = dict(GENE_BOUNDS)
+        merged.update(parsed)
+        return _resolve_bounds(merged)
+    return _resolve_bounds(parsed)
 
 
 def validate_seed_split(
@@ -515,6 +563,494 @@ def synthetic_scenario_seed_q(
     return float(0.5 * s + 0.35 * r + 0.15 * t_comp)
 
 
+@dataclass
+class _PackedBundle:
+    packets: list[bytes]
+    decoded_results: list[object]
+    rx_times: list[float]
+    tx_time_s: float
+
+
+class PipelineSessionContext:
+    """
+    Кеш незмінного контексту сеансу (конфіг, кадри, класифікатор MLP) для швидкої оцінки
+    хромосом у реальному конвеєрі без кешування результатів різних викликів fitness.
+    """
+
+    def __init__(
+        self,
+        repo_root: Path | None = None,
+        config_path: str | os.PathLike[str] | None = None,
+        session_path: str | os.PathLike[str] | None = None,
+        salt: bytes | None = None,
+        session_nonce_prefix: bytes = b"SESSGA01",
+        device_id: int = 1,
+    ) -> None:
+        self.repo_root = Path(repo_root) if repo_root is not None else _REPO_ROOT
+        self.config_path = Path(config_path) if config_path is not None else (self.repo_root / "team" / "team_config.json")
+        self.session_path = Path(session_path) if session_path is not None else (self.repo_root / "team" / "session.bin")
+        self.salt = salt if salt is not None else bytes.fromhex("000102030405060708090A0B0C0D0E0F")
+        self.session_nonce_prefix = session_nonce_prefix
+        self.device_id = device_id
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        from src.classification import CLASS_TO_KEY, classify_frames
+        from src.telemetry import load_session_bin
+
+        with open(self.config_path, encoding="utf-8") as fh:
+            self.config: dict = json.load(fh)
+        self.password: str = str(self.config.get("пароль_сеансу", "algo2026"))
+        self.q_weights: dict = dict(self.config["метрика_Q"])
+        self.scenarios_cfg: dict = dict(self.config["канал"]["сценарії"])
+        self.prio_cfg: dict = dict(self.config["пріоритети_кадрів"])
+        pack_cfg = self.config.get("пакування", {})
+        self.max_packet_bytes: int = int(pack_cfg.get("max_packet_bytes", 512))
+
+        self.frames = load_session_bin(str(self.session_path))
+        self.classes = classify_frames(self.frames)
+        self.base_priorities: list[int] = [
+            int(self.prio_cfg[CLASS_TO_KEY[cls]]) for cls in self.classes
+        ]
+        self._loaded = True
+
+    def pack_and_decode(self, genes: Mapping[str, float | int]) -> _PackedBundle:
+        """Виконує TX-пакування й одноразове RX-декодування пакетів для заданої хромосоми."""
+        from src.dp import pack_telemetry_stream
+        from src.receiver import receive_packet_ex
+
+        self._ensure_loaded()
+        block_size = max(1, int(round(float(genes["block_size"]))))
+        compression_threshold = float(genes["compression_threshold"])
+        priority_weight = float(genes["priority_weight"])
+        max_pkt_bytes = (
+            int(round(float(genes["max_packet_bytes"])))
+            if "max_packet_bytes" in genes
+            else self.max_packet_bytes
+        )
+
+        t_tx0 = time.perf_counter()
+        values = [
+            max(0, int(round(base_p + (priority_weight if f.critical == 1 else 0.0))))
+            for f, base_p in zip(self.frames, self.base_priorities)
+        ]
+        packets = pack_telemetry_stream(
+            self.frames,
+            values=values,
+            config=self.config,
+            max_packet_bytes=max_pkt_bytes,
+            candidate_window_frames=block_size,
+            compression_threshold=compression_threshold,
+            priority_weight=1.0,
+            password=self.password,
+            salt=self.salt,
+            session_nonce_prefix=self.session_nonce_prefix,
+            device_id=self.device_id,
+            schedule=True,
+            seal=True,
+        )
+        tx_time_s = time.perf_counter() - t_tx0
+
+        decoded_results: list[object] = []
+        rx_times: list[float] = []
+        for pkt in packets:
+            t_rx0 = time.perf_counter()
+            res = receive_packet_ex(pkt, self.password)
+            rx_times.append(time.perf_counter() - t_rx0)
+            decoded_results.append(res)
+
+        return _PackedBundle(
+            packets=packets,
+            decoded_results=decoded_results,
+            rx_times=rx_times,
+            tx_time_s=tx_time_s,
+        )
+
+    def evaluate_packed_on_channel(
+        self,
+        packed_bundle: _PackedBundle,
+        scenario: str,
+        seed: int,
+        fixed_compute_time_s: float | None = None,
+        timing_noise_std: float = 0.0,
+        rng: random.Random | None = None,
+    ) -> dict[str, float]:
+        """Проганяє вже упакований потік через `Channel(scenario, seed)` і рахує метрики S, R, T, Q."""
+        from team.channel import Channel
+        from src.channel_runner import evaluate_metrics
+
+        self._ensure_loaded()
+        if scenario not in self.scenarios_cfg:
+            raise ValueError(f"Невідомий сценарій каналу: {scenario!r}")
+        if seed == FORBIDDEN_CHANNEL_SEED:
+            raise ValueError(f"Відкритий seed {FORBIDDEN_CHANNEL_SEED} заборонено використовувати")
+
+        ch = Channel(self.scenarios_cfg[scenario], seed=seed)
+        bytes_sent = 0
+        recovered = []
+        seen: set[tuple[int, bytes]] = set()
+        rx_time_s = 0.0
+        crashed = False
+
+        for pkt, res, pkt_rx_t in zip(
+            packed_bundle.packets, packed_bundle.decoded_results, packed_bundle.rx_times
+        ):
+            prev_sent = ch.sent
+            delivered, _ = ch.send(pkt)
+            if ch.sent > prev_sent:
+                bytes_sent += len(pkt)
+            if delivered:
+                rx_time_s += pkt_rx_t
+                if res.error is not None:  # type: ignore[attr-defined]
+                    crashed = True
+                else:
+                    for frame in res.frames:  # type: ignore[attr-defined]
+                        key = (frame.timestamp_ms, frame.to_bytes())
+                        if key not in seen:
+                            seen.add(key)
+                            recovered.append(frame)
+
+        recovered.sort(key=lambda f: f.timestamp_ms)
+
+        raw_compute_time_s = (
+            float(fixed_compute_time_s)
+            if fixed_compute_time_s is not None
+            else (packed_bundle.tx_time_s + rx_time_s)
+        )
+        if timing_noise_std > 0.0:
+            eff_rng = rng if rng is not None else random.Random()
+            raw_compute_time_s = max(0.001, raw_compute_time_s + eff_rng.gauss(0.0, timing_noise_std))
+
+        metrics = evaluate_metrics(
+            self.frames,
+            recovered,
+            bytes_sent,
+            raw_compute_time_s,
+            self.q_weights,
+            crashed=crashed,
+        )
+        return {
+            "S": float(metrics["S"]),
+            "R": float(metrics["R"]),
+            "T": float(metrics["T"]),
+            "Q": float(metrics["Q"]),
+            "crit_loss_rate": float(metrics["crit_loss_rate"]),
+            "tx_time_s": float(packed_bundle.tx_time_s),
+            "rx_time_s": float(rx_time_s),
+            "compute_time_s": float(metrics["compute_time_s"]),
+            "bytes_sent": float(metrics["bytes_sent"]),
+        }
+
+
+_DEFAULT_PIPELINE_CONTEXT: PipelineSessionContext | None = None
+
+
+def get_default_pipeline_context() -> PipelineSessionContext:
+    """Повертає спільний лінивий контекст конвеєра для `call_pipeline`."""
+    global _DEFAULT_PIPELINE_CONTEXT
+    if _DEFAULT_PIPELINE_CONTEXT is None:
+        _DEFAULT_PIPELINE_CONTEXT = PipelineSessionContext()
+    return _DEFAULT_PIPELINE_CONTEXT
+
+
+def call_pipeline(
+    genes: Mapping[str, float | int],
+    scenario: str = "робочий",
+    seed: int = 11,
+    fixed_compute_time_s: float | None = None,
+    timing_noise_std: float = 0.0,
+    rng: random.Random | None = None,
+    context: PipelineSessionContext | None = None,
+) -> float:
+    """Адаптер реального конвеєра: за хромосомою, сценарієм і seed каналу повертає Q."""
+    ctx = context if context is not None else get_default_pipeline_context()
+    bundle = ctx.pack_and_decode(genes)
+    metrics = ctx.evaluate_packed_on_channel(
+        bundle,
+        scenario=scenario,
+        seed=seed,
+        fixed_compute_time_s=fixed_compute_time_s,
+        timing_noise_std=timing_noise_std,
+        rng=rng,
+    )
+    return float(metrics["Q"])
+
+
+def _bracketing_weights(axis: Sequence[float], value: float) -> tuple[int, int, float]:
+    if len(axis) <= 1 or value <= axis[0]:
+        return 0, 0, 0.0
+    if value >= axis[-1]:
+        last = len(axis) - 1
+        return last, last, 0.0
+    for idx in range(len(axis) - 1):
+        lo = axis[idx]
+        hi = axis[idx + 1]
+        if lo <= value <= hi:
+            frac = 0.0 if hi == lo else (value - lo) / (hi - lo)
+            return idx, idx + 1, frac
+    last = len(axis) - 1
+    return last, last, 0.0
+
+
+class PipelineGridTable:
+    """
+    Попередньо обчислена на реальному конвеєрі 3D-сітка (block_size × compression_threshold × priority_weight)
+    із трилінійною інтерполяцією (S, R, tx_time_s, rx_time_s) для швидких масових досліджень ГА.
+    """
+
+    def __init__(
+        self,
+        block_sizes: Sequence[int],
+        compression_thresholds: Sequence[float],
+        priority_weights: Sequence[float],
+        scenarios: Sequence[str],
+        seeds: Sequence[int],
+        q_weights: Mapping[str, float],
+        records: list[dict[str, dict[str, dict[str, float]]]],
+        measured_noise_std: float = 0.0,
+        measured_timing_noise_std: float = 0.0,
+        median_compute_time_s: float = 0.15,
+        single_eval_time_s: float = 0.0,
+        build_total_s: float = 0.0,
+        measured_compute_times_s: Sequence[float] = (),
+    ) -> None:
+        self.block_sizes = [int(x) for x in block_sizes]
+        self.compression_thresholds = [float(x) for x in compression_thresholds]
+        self.priority_weights = [float(x) for x in priority_weights]
+        self.scenarios = list(scenarios)
+        self.seeds = [int(s) for s in seeds]
+        self.q_weights = dict(q_weights)
+        self.records = records
+        self.measured_noise_std = float(measured_noise_std)
+        self.measured_timing_noise_std = float(measured_timing_noise_std)
+        self.median_compute_time_s = float(median_compute_time_s)
+        self.single_eval_time_s = float(single_eval_time_s)
+        self.build_total_s = float(build_total_s)
+        self.measured_compute_times_s = [float(t) for t in measured_compute_times_s]
+
+        expected = (
+            len(self.block_sizes)
+            * len(self.compression_thresholds)
+            * len(self.priority_weights)
+        )
+        if len(self.records) != expected:
+            raise ValueError(f"Очікувалось {expected} вузлів сітки, отримано {len(self.records)}")
+
+    def _node(self, ib: int, ic: int, ip: int) -> dict[str, dict[str, dict[str, float]]]:
+        idx = (ib * len(self.compression_thresholds) + ic) * len(self.priority_weights) + ip
+        return self.records[idx]
+
+    def interpolate_metrics(
+        self, genes: Mapping[str, float | int], scenario: str, seed: int
+    ) -> tuple[float, float, float, float]:
+        if scenario not in self.scenarios:
+            raise ValueError(f"Сценарій {scenario!r} відсутній у таблиці")
+        if seed == FORBIDDEN_CHANNEL_SEED:
+            raise ValueError(f"Відкритий seed {FORBIDDEN_CHANNEL_SEED} заборонено використовувати")
+        seed_key = str(int(seed))
+        if seed not in self.seeds:
+            raise ValueError(f"Seed {seed} відсутній у таблиці ({self.seeds})")
+
+        ib0, ib1, tb = _bracketing_weights([float(v) for v in self.block_sizes], float(genes["block_size"]))
+        ic0, ic1, tc = _bracketing_weights(self.compression_thresholds, float(genes["compression_threshold"]))
+        ip0, ip1, tp = _bracketing_weights(self.priority_weights, float(genes["priority_weight"]))
+
+        s_acc = 0.0
+        r_acc = 0.0
+        tx_acc = 0.0
+        rx_acc = 0.0
+        for ib, wb in ((ib0, 1.0 - tb), (ib1, tb)):
+            for ic, wc in ((ic0, 1.0 - tc), (ic1, tc)):
+                for ip, wp in ((ip0, 1.0 - tp), (ip1, tp)):
+                    weight = wb * wc * wp
+                    if weight == 0.0:
+                        continue
+                    cell = self._node(ib, ic, ip)[scenario][seed_key]
+                    s_acc += weight * float(cell["S"])
+                    r_acc += weight * float(cell["R"])
+                    tx_acc += weight * float(cell["tx"])
+                    rx_acc += weight * float(cell["rx"])
+
+        return s_acc, r_acc, tx_acc, rx_acc
+
+    def scenario_seed_q(
+        self,
+        genes: Mapping[str, float | int],
+        scenario: str = "робочий",
+        seed: int = 11,
+        fixed_compute_time_s: float | None = None,
+        timing_noise_std: float = 0.0,
+        rng: random.Random | None = None,
+    ) -> float:
+        """Обчислює інтерпольоване `Q` за таблицею реального конвеєра."""
+        s_val, r_val, tx_val, rx_val = self.interpolate_metrics(genes, scenario=scenario, seed=seed)
+        if r_val <= 0.0:
+            return 0.0
+
+        t_exec = float(fixed_compute_time_s) if fixed_compute_time_s is not None else (tx_val + rx_val)
+        if timing_noise_std > 0.0:
+            eff_rng = rng if rng is not None else random.Random()
+            t_exec = max(0.001, t_exec + eff_rng.gauss(0.0, timing_noise_std))
+
+        t_ref = float(self.q_weights.get("t_ref_секунд", self.q_weights.get("t_ref", 20.0)))
+        alpha = float(self.q_weights.get("alpha", 0.5))
+        beta = float(self.q_weights.get("beta", 0.35))
+        gamma = float(self.q_weights.get("gamma", 0.15))
+
+        t_comp = (t_ref / (t_ref + max(0.0, t_exec))) if t_ref > 0 else 0.0
+        q = alpha * s_val + beta * r_val + gamma * t_comp
+        return float(max(0.0, min(1.0, q)))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "block_sizes": self.block_sizes,
+            "compression_thresholds": self.compression_thresholds,
+            "priority_weights": self.priority_weights,
+            "scenarios": self.scenarios,
+            "seeds": self.seeds,
+            "q_weights": self.q_weights,
+            "measured_noise_std": self.measured_noise_std,
+            "measured_timing_noise_std": self.measured_timing_noise_std,
+            "median_compute_time_s": self.median_compute_time_s,
+            "single_eval_time_s": self.single_eval_time_s,
+            "build_total_s": self.build_total_s,
+            "measured_compute_times_s": self.measured_compute_times_s,
+            "records": self.records,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PipelineGridTable:
+        return cls(
+            block_sizes=list(data["block_sizes"]),  # type: ignore[arg-type]
+            compression_thresholds=list(data["compression_thresholds"]),  # type: ignore[arg-type]
+            priority_weights=list(data["priority_weights"]),  # type: ignore[arg-type]
+            scenarios=list(data["scenarios"]),  # type: ignore[arg-type]
+            seeds=list(data["seeds"]),  # type: ignore[arg-type]
+            q_weights=dict(data["q_weights"]),  # type: ignore[arg-type]
+            records=list(data["records"]),  # type: ignore[arg-type]
+            measured_noise_std=float(data.get("measured_noise_std", 0.0)),  # type: ignore[arg-type]
+            measured_timing_noise_std=float(data.get("measured_timing_noise_std", 0.0)),  # type: ignore[arg-type]
+            median_compute_time_s=float(data.get("median_compute_time_s", 0.15)),  # type: ignore[arg-type]
+            single_eval_time_s=float(data.get("single_eval_time_s", 0.0)),  # type: ignore[arg-type]
+            build_total_s=float(data.get("build_total_s", 0.0)),  # type: ignore[arg-type]
+            measured_compute_times_s=list(data.get("measured_compute_times_s", ())),  # type: ignore[arg-type]
+        )
+
+
+def build_pipeline_grid_table(
+    block_sizes: Sequence[int] = DEFAULT_GRID_BLOCK_SIZES,
+    compression_thresholds: Sequence[float] = DEFAULT_GRID_COMP_THRESHOLDS,
+    priority_weights: Sequence[float] = DEFAULT_GRID_PRIORITY_WEIGHTS,
+    scenarios: Sequence[str] = DEFAULT_VAL_SCENARIOS,
+    seeds: Sequence[int] = (*DEFAULT_TRAIN_SEEDS, *DEFAULT_VAL_SEEDS),
+    noise_samples: int = 15,
+    context: PipelineSessionContext | None = None,
+) -> PipelineGridTable:
+    """Будує 3D-сітку значень S, R і часу виконання на реальному конвеєрі."""
+    if FORBIDDEN_CHANNEL_SEED in set(seeds):
+        raise ValueError(f"Відкритий seed {FORBIDDEN_CHANNEL_SEED} заборонено використовувати")
+
+    ctx = context if context is not None else get_default_pipeline_context()
+    ctx._ensure_loaded()
+
+    sorted_b = sorted({int(x) for x in block_sizes})
+    sorted_c = sorted({float(x) for x in compression_thresholds})
+    sorted_p = sorted({float(x) for x in priority_weights})
+    eff_scenarios = list(scenarios)
+    eff_seeds = [int(s) for s in seeds]
+
+    t_build0 = time.perf_counter()
+    records: list[dict[str, dict[str, dict[str, float]]]] = []
+    train_eval_times: list[float] = []
+
+    for b, c, p in itertools.product(sorted_b, sorted_c, sorted_p):
+        genes = {"block_size": b, "compression_threshold": c, "priority_weight": p}
+        t_node0 = time.perf_counter()
+        bundle = ctx.pack_and_decode(genes)
+        node_entry: dict[str, dict[str, dict[str, float]]] = {}
+        train_pair_elapsed = 0.0
+        t_pack_elapsed = time.perf_counter() - t_node0
+
+        for sc in eff_scenarios:
+            sc_map: dict[str, dict[str, float]] = {}
+            for sd in eff_seeds:
+                t_ch0 = time.perf_counter()
+                m = ctx.evaluate_packed_on_channel(bundle, scenario=sc, seed=sd)
+                if sc in DEFAULT_TRAIN_SCENARIOS and sd in DEFAULT_TRAIN_SEEDS:
+                    train_pair_elapsed += time.perf_counter() - t_ch0
+                sc_map[str(sd)] = {
+                    "S": round(m["S"], 8),
+                    "R": round(m["R"], 8),
+                    "tx": round(m["tx_time_s"], 6),
+                    "rx": round(m["rx_time_s"], 6),
+                }
+            node_entry[sc] = sc_map
+
+        train_eval_times.append(t_pack_elapsed + train_pair_elapsed)
+        records.append(node_entry)
+
+    # Вимір шуму від фактичного часу виконання T на базовій хромосомі (§3.4–3.5 design/ga.md)
+    default_genes = get_default_hyperparams(ctx.config)
+    noise_scenario = "аварійний" if "аварійний" in eff_scenarios else eff_scenarios[-1]
+    noise_seed = DEFAULT_VAL_SEEDS[0] if DEFAULT_VAL_SEEDS[0] in eff_seeds else eff_seeds[0]
+    compute_times: list[float] = []
+    q_samples: list[float] = []
+    for _ in range(max(0, noise_samples)):
+        bundle = ctx.pack_and_decode(default_genes)
+        m = ctx.evaluate_packed_on_channel(bundle, scenario=noise_scenario, seed=noise_seed)
+        compute_times.append(float(m["compute_time_s"]))
+        q_samples.append(float(m["Q"]))
+
+    build_total_s = time.perf_counter() - t_build0
+    if len(compute_times) >= 2:
+        measured_timing_noise_std = float(statistics.stdev(compute_times))
+        measured_noise_std = float(statistics.stdev(q_samples))
+        median_compute_time_s = float(statistics.median(compute_times))
+    elif compute_times:
+        measured_timing_noise_std = 0.0
+        measured_noise_std = 0.0
+        median_compute_time_s = float(compute_times[0])
+    else:
+        measured_timing_noise_std = 0.0
+        measured_noise_std = 0.0
+        median_compute_time_s = float(statistics.median(train_eval_times)) if train_eval_times else 0.15
+
+    single_eval_time_s = float(statistics.mean(train_eval_times)) if train_eval_times else 0.0
+
+    return PipelineGridTable(
+        block_sizes=sorted_b,
+        compression_thresholds=sorted_c,
+        priority_weights=sorted_p,
+        scenarios=eff_scenarios,
+        seeds=eff_seeds,
+        q_weights=ctx.q_weights,
+        records=records,
+        measured_noise_std=measured_noise_std,
+        measured_timing_noise_std=measured_timing_noise_std,
+        median_compute_time_s=median_compute_time_s,
+        single_eval_time_s=single_eval_time_s,
+        build_total_s=build_total_s,
+        measured_compute_times_s=compute_times,
+    )
+
+
+def save_pipeline_grid_table(table: PipelineGridTable, path: str | os.PathLike[str]) -> None:
+    """Зберігає попередньо обчислену таблицю конвеєра у JSON."""
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(table.to_dict(), fh, ensure_ascii=False, indent=2)
+
+
+def load_pipeline_grid_table(path: str | os.PathLike[str]) -> PipelineGridTable:
+    """Завантажує попередньо обчислену таблицю конвеєра з JSON."""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return PipelineGridTable.from_dict(data)
+
+
 def build_fitness_evaluator(
     scenario_seed_fn: Callable[..., float] = synthetic_scenario_seed_q,
     scenarios: Sequence[str] = DEFAULT_TRAIN_SCENARIOS,
@@ -531,21 +1067,39 @@ def build_fitness_evaluator(
 
     eff_scenarios = tuple(scenarios)
     eff_seeds = tuple(seeds)
+    for sc in eff_scenarios:
+        if sc not in ("спокійний", "робочий", "аварійний"):
+            raise ValueError(f"Невідомий сценарій каналу: {sc!r}")
 
     def _fitness(genes: dict[str, int | float]) -> float:
         total = 0.0
-        for sc in eff_scenarios:
-            for sd in eff_seeds:
-                total += float(
-                    scenario_seed_fn(
-                        genes,
+        if scenario_seed_fn is call_pipeline:
+            ctx = get_default_pipeline_context()
+            bundle = ctx.pack_and_decode(genes)
+            for sc in eff_scenarios:
+                for sd in eff_seeds:
+                    m = ctx.evaluate_packed_on_channel(
+                        bundle,
                         scenario=sc,
                         seed=sd,
                         fixed_compute_time_s=fixed_compute_time_s,
                         timing_noise_std=timing_noise_std,
                         rng=rng,
                     )
-                )
+                    total += float(m["Q"])
+        else:
+            for sc in eff_scenarios:
+                for sd in eff_seeds:
+                    total += float(
+                        scenario_seed_fn(
+                            genes,
+                            scenario=sc,
+                            seed=sd,
+                            fixed_compute_time_s=fixed_compute_time_s,
+                            timing_noise_std=timing_noise_std,
+                            rng=rng,
+                        )
+                    )
         return total / (len(eff_scenarios) * len(eff_seeds))
 
     return _fitness
@@ -564,6 +1118,45 @@ def evaluate_train_and_val(
     validate_seed_split(train_seeds, val_seeds)
     genes_copy = dict(genes)
 
+    if scenario_seed_fn is call_pipeline:
+        ctx = get_default_pipeline_context()
+        t_start = time.perf_counter()
+        bundle = ctx.pack_and_decode(genes_copy)
+        train_scores = [
+            float(
+                ctx.evaluate_packed_on_channel(
+                    bundle, scenario=sc, seed=sd, fixed_compute_time_s=fixed_compute_time_s
+                )["Q"]
+            )
+            for sc in train_scenarios
+            for sd in train_seeds
+        ]
+        single_eval_time_s = time.perf_counter() - t_start
+        train_q = float(sum(train_scores) / len(train_scores))
+
+        result: dict[str, float] = {
+            "train_q": train_q,
+            "single_eval_time_s": single_eval_time_s,
+        }
+        val_scores: list[float] = []
+        for sc in val_scenarios:
+            sc_scores = [
+                float(
+                    ctx.evaluate_packed_on_channel(
+                        bundle, scenario=sc, seed=sd, fixed_compute_time_s=fixed_compute_time_s
+                    )["Q"]
+                )
+                for sd in val_seeds
+            ]
+            sc_q = float(sum(sc_scores) / len(sc_scores))
+            result[f"val_q_{sc}"] = sc_q
+            val_scores.append(sc_q)
+
+        val_q = float(sum(val_scores) / len(val_scores))
+        result["val_q"] = val_q
+        result["gap_train_minus_val"] = train_q - val_q
+        return result
+
     train_eval = build_fitness_evaluator(
         scenario_seed_fn=scenario_seed_fn,
         scenarios=train_scenarios,
@@ -573,8 +1166,8 @@ def evaluate_train_and_val(
     )
     train_q = float(train_eval(genes_copy))
 
-    result: dict[str, float] = {"train_q": train_q}
-    val_scores: list[float] = []
+    result = {"train_q": train_q}
+    val_scores = []
     for sc in val_scenarios:
         sc_eval = build_fitness_evaluator(
             scenario_seed_fn=scenario_seed_fn,
