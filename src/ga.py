@@ -598,11 +598,12 @@ class PipelineSessionContext:
         if self._loaded:
             return
         from src.classification import CLASS_TO_KEY, classify_frames
+        from src.crypto import resolve_session_password
         from src.telemetry import load_session_bin
 
         with open(self.config_path, encoding="utf-8") as fh:
             self.config: dict = json.load(fh)
-        self.password: str = str(self.config.get("пароль_сеансу", "algo2026"))
+        self.password: str = resolve_session_password(self.config)
         self.q_weights: dict = dict(self.config["метрика_Q"])
         self.scenarios_cfg: dict = dict(self.config["канал"]["сценарії"])
         self.prio_cfg: dict = dict(self.config["пріоритети_кадрів"])
