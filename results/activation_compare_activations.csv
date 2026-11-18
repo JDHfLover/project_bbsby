@@ -1,0 +1,19 @@
+name,group,act,init,ext_mean,ext_std,delta_vs_relu,se,z,verdict
+hand w=5 act=relu,act,relu,he,0.92343,0.0035,0.0,0.00165,0.0,в межах шуму
+hand w=5 act=leaky,act,leaky,he,0.92391,0.00231,0.00048,0.0014,0.34,в межах шуму
+hand w=5 act=elu,act,elu,he,0.92261,0.00474,-0.00082,0.00197,-0.41,в межах шуму
+hand w=5 act=silu,act,silu,he,0.92481,0.00371,0.00138,0.0017,0.81,в межах шуму
+hand w=5 act=gelu,act,gelu,he,0.92402,0.00276,0.00059,0.00149,0.4,в межах шуму
+hand w=5 act=softplus,act,softplus,he,0.92011,0.00443,-0.00332,0.00188,-1.76,в межах шуму
+hand w=5 act=tanh,act,tanh,xavier,0.91424,0.00308,-0.00919,0.00155,-5.91,значуще гірше
+hand w=5 act=sigmoid,act,sigmoid,xavier,0.90957,0.00246,-0.01386,0.00143,-9.71,значуще гірше
+hand w=5 act=linear,act,linear,xavier,0.86516,0.0048,-0.05827,0.00198,-29.42,значуще гірше
+hand w=5 act=relu init=xavier,act_init,relu,xavier,0.92189,0.00396,-0.00154,0.00176,-0.87,в межах шуму
+hand w=5 act=leaky init=xavier,act_init,leaky,xavier,0.92172,0.00472,-0.00171,0.00196,-0.87,в межах шуму
+hand w=5 act=elu init=xavier,act_init,elu,xavier,0.92493,0.00424,0.0015,0.00183,0.82,в межах шуму
+hand w=5 act=silu init=xavier,act_init,silu,xavier,0.9254,0.00558,0.00197,0.0022,0.9,в межах шуму
+hand w=5 act=gelu init=xavier,act_init,gelu,xavier,0.92551,0.00364,0.00208,0.00168,1.23,в межах шуму
+hand w=5 act=softplus init=xavier,act_init,softplus,xavier,0.92489,0.00378,0.00147,0.00172,0.85,в межах шуму
+hand w=5 act=tanh init=he,act_init,tanh,he,0.90951,0.00742,-0.01392,0.00274,-5.09,значуще гірше
+hand w=5 act=sigmoid init=he,act_init,sigmoid,he,0.90911,0.00399,-0.01432,0.00177,-8.1,значуще гірше
+hand w=5 act=linear init=he,act_init,linear,he,0.86481,0.00422,-0.05862,0.00183,-32.08,значуще гірше

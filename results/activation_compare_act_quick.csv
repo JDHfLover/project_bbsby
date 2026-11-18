@@ -1,0 +1,19 @@
+name,group,act,init,ext_mean,ext_std,delta_vs_relu,se,z,verdict
+hand w=5 act=relu,act,relu,he,0.92034,0.00462,0.0,0.00462,0.0,замало --seeds (<5) для висновку
+hand w=5 act=leaky,act,leaky,he,0.92081,0.00487,0.00047,0.00474,0.1,замало --seeds (<5) для висновку
+hand w=5 act=elu,act,elu,he,0.92356,0.00288,0.00322,0.00385,0.84,замало --seeds (<5) для висновку
+hand w=5 act=silu,act,silu,he,0.91687,0.01041,-0.00347,0.00805,-0.43,замало --seeds (<5) для висновку
+hand w=5 act=gelu,act,gelu,he,0.92295,0.0018,0.00261,0.0035,0.75,замало --seeds (<5) для висновку
+hand w=5 act=softplus,act,softplus,he,0.9188,0.00692,-0.00154,0.00589,-0.26,замало --seeds (<5) для висновку
+hand w=5 act=tanh,act,tanh,xavier,0.91237,0.00223,-0.00797,0.00363,-2.2,замало --seeds (<5) для висновку
+hand w=5 act=sigmoid,act,sigmoid,xavier,0.90023,0.00249,-0.02011,0.00371,-5.42,замало --seeds (<5) для висновку
+hand w=5 act=linear,act,linear,xavier,0.86129,0.00391,-0.05906,0.00428,-13.81,замало --seeds (<5) для висновку
+hand w=5 act=relu init=xavier,act_init,relu,xavier,0.91893,0.00475,-0.00141,0.00469,-0.3,замало --seeds (<5) для висновку
+hand w=5 act=leaky init=xavier,act_init,leaky,xavier,0.91893,0.00475,-0.00141,0.00469,-0.3,замало --seeds (<5) для висновку
+hand w=5 act=elu init=xavier,act_init,elu,xavier,0.92207,0.00515,0.00172,0.00489,0.35,замало --seeds (<5) для висновку
+hand w=5 act=silu init=xavier,act_init,silu,xavier,0.92301,0.01032,0.00267,0.00799,0.33,замало --seeds (<5) для висновку
+hand w=5 act=gelu init=xavier,act_init,gelu,xavier,0.92252,0.00716,0.00218,0.00603,0.36,замало --seeds (<5) для висновку
+hand w=5 act=softplus init=xavier,act_init,softplus,xavier,0.92371,0.00128,0.00337,0.00339,1.0,замало --seeds (<5) для висновку
+hand w=5 act=tanh init=he,act_init,tanh,he,0.90642,0.00287,-0.01392,0.00384,-3.62,замало --seeds (<5) для висновку
+hand w=5 act=sigmoid init=he,act_init,sigmoid,he,0.89888,0.00768,-0.02146,0.00634,-3.39,замало --seeds (<5) для висновку
+hand w=5 act=linear init=he,act_init,linear,he,0.86188,0.00456,-0.05846,0.00459,-12.75,замало --seeds (<5) для висновку

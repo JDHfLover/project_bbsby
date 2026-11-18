@@ -1,0 +1,40 @@
+{
+  "window_size": 5,
+  "feature_names": [
+    "dalt",
+    "dtmp",
+    "absvib",
+    "std_vib",
+    "std_alt",
+    "std_temp",
+    "mfreq"
+  ],
+  "num_classes": 3,
+  "class_names": {
+    "0": "норма",
+    "1": "аномалія",
+    "2": "перехідний_режим"
+  },
+  "version": "classifier_v1",
+  "hidden": 32,
+  "activation": "relu",
+  "optimizer": "adam",
+  "lr": 0.001,
+  "batch_size": 64,
+  "patience": 15,
+  "class_weights": "none",
+  "normalization": "zscore",
+  "selected_seed": 1,
+  "best_epoch": 70,
+  "val_macro_f1": 0.93272,
+  "valid_macro_f1": 0.92265,
+  "valid_f1_per_class": [
+    0.98184,
+    0.94264,
+    0.84348
+  ],
+  "date": "2026-11-18T01:48:25",
+  "commit": "29c4983",
+  "train_sha256_16": "5c942b1d9c1c0342",
+  "valid_sha256_16": "24981f64ee2e6cbb"
+}

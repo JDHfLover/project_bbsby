@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-18T00:00:04",
+  "commit": "541a32e",
+  "args": {
+    "data_dir": "team",
+    "out_dir": "results",
+    "seeds": 10,
+    "quick": false,
+    "base_window": 5,
+    "groups": "act_lr",
+    "norm": "zscore",
+    "cw": "none",
+    "act": "relu",
+    "init": "auto",
+    "lr": 0.001,
+    "epochs": 100,
+    "patience": 15,
+    "tag": "act_lr",
+    "overwrite": false,
+    "skip_selftest": false
+  },
+  "numpy": "2.5.4",
+  "python": "3.14.9",
+  "train_sha256_16": "5c942b1d9c1c0342",
+  "valid_sha256_16": "24981f64ee2e6cbb",
+  "protocol": "ознаки по всьому файлу; блоковий спліт 80/20 з розривом P+F; вибір епохи за val-частиною; звіт на valid.csv",
+  "total_seconds": 108.9
+}
