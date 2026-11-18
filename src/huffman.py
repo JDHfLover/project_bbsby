@@ -238,7 +238,7 @@ def build_decoder_tables(
 def pack_bitstream(data: bytes, canonical_codes: Mapping[int, tuple[int, int]]) -> bytes:
     """Пакує байти у бітовий потік MSB-first блочним зсувом з доповненням нулями до межі байта."""
     out = bytearray()
-    
+
     acc = 0
     bits_in_acc = 0
 
@@ -258,7 +258,7 @@ def pack_bitstream(data: bytes, canonical_codes: Mapping[int, tuple[int, int]]) 
                 f"Некоректний код Гаффмана для символу {b}: "
                 f"code={code!r}, length={length!r}"
             )
-        
+
         acc = (acc << length) | code
         bits_in_acc += length
         while bits_in_acc >= 8:

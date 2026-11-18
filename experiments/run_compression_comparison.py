@@ -6,8 +6,6 @@ vs 32-бітне арифметичне кодування (`src/arithmetic.py`)
 from __future__ import annotations
 
 import csv
-import os
-import struct
 import sys
 import time
 from pathlib import Path
