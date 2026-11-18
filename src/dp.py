@@ -14,6 +14,7 @@ from src.crypto import (
     HEADER_FORMAT,
     HEADER_SIZE,
     HMAC_SIZE,
+    resolve_session_password,
     seal_packet as _crypto_seal_packet,
 )
 from src.huffman import (
@@ -437,16 +438,19 @@ def _should_use_no_compression(
     compressed_bits: int,
     compression_threshold: float,
 ) -> bool:
-    """Перевіряє, чи потрібно перейти в режим NO_COMPRESSION замість Гаффмана."""
+    """
+    Перевіряє, чи потрібно перейти в режим NO_COMPRESSION замість Гаффмана.
+    На відрізку [0.0, 1.0] семантика строго монотонна: поріг задає мінімальну
+    відносну економію бітів (raw_bits - compressed_bits) / raw_bits; для значень > 1.0
+    інтерпретується як мінімальна абсолютна економія в бітах.
+    """
     if raw_bits <= 0:
         return False
     bit_gain = raw_bits - compressed_bits
     if compression_threshold <= 0.0:
         return bit_gain <= 0
-    if compression_threshold <= 0.5:
+    if compression_threshold <= 1.0:
         return (bit_gain / raw_bits) < compression_threshold
-    if compression_threshold < 1.0:
-        return (compressed_bits / raw_bits) > compression_threshold
     return bit_gain < compression_threshold
 
 
@@ -528,10 +532,16 @@ def pack_telemetry_stream(
             )
 
         if use_no_compression:
-            # Fallback на NO_COMPRESSION при W <= 0 або недостатньому виграші стиснення
+            # Fallback на NO_COMPRESSION при W <= 0 або недостатньому виграші стиснення:
+            # усі кадри мають однакову вагу 96 біт, тому оптимальний вибір — top take_cnt за цінністю.
             take_cnt = min(len(win_frames), max_raw_frames)
-            chosen_idx = list(range(take_cnt))
-            chosen_frames = win_frames[:take_cnt]
+            if strategy == "baseline":
+                chosen_idx = list(range(take_cnt))
+            else:
+                chosen_idx = sorted(
+                    sorted(range(len(win_frames)), key=lambda i: (-win_values[i], i))[:take_cnt]
+                )
+            chosen_frames = [win_frames[i] for i in chosen_idx]
             flags = FLAG_NO_COMPRESSION
             payload = build_payload(chosen_frames, flags=flags)
         else:
@@ -554,7 +564,10 @@ def pack_telemetry_stream(
         payloads_with_meta.append((payload, meta))
 
         chosen_set = set(chosen_idx)
-        queue = [item for idx, item in enumerate(win_items) if idx not in chosen_set] + queue[eff_win:]
+        unchosen = [item for idx, item in enumerate(win_items) if idx not in chosen_set]
+        crit_unchosen = [item for item in unchosen if item[0].critical == 1]
+        noncrit_unchosen = [item for item in unchosen if item[0].critical == 0]
+        queue = crit_unchosen + queue[eff_win:] + noncrit_unchosen
 
     if schedule:
         payloads_with_meta = schedule_packets_with_meta(payloads_with_meta)
@@ -562,15 +575,7 @@ def pack_telemetry_stream(
     if not seal:
         return payloads_with_meta if return_meta else [p for p, _ in payloads_with_meta]
 
-    eff_password = (
-        password
-        if password is not None
-        else (
-            config.get("пароль_сеансу", config.get("password", "algo2026"))
-            if isinstance(config, dict)
-            else "algo2026"
-        )
-    )
+    eff_password = password if password is not None else resolve_session_password(config)
     eff_salt = salt if salt is not None else secrets.token_bytes(16)
     eff_prefix = session_nonce_prefix if session_nonce_prefix is not None else secrets.token_bytes(8)
     if len(eff_salt) != 16:
