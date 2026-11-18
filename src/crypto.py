@@ -346,7 +346,7 @@ class SessionCryptoContext:
         self._used_nonces.clear()
         self._closed = True
 
-    def __enter__(self) -> "SessionCryptoContext":
+    def __enter__(self) -> SessionCryptoContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -383,7 +383,7 @@ def _build_huffman_payload_bytes(
     codes = build_canonical_codes(lengths)
     bitstream = pack_bitstream(data, codes)
     table_nsym = len(lengths)
-    table_bytes = b"".join(struct.pack(">BB", sym, l) for sym, l in sorted(lengths.items()))
+    table_bytes = b"".join(struct.pack(">BB", sym, code_len) for sym, code_len in sorted(lengths.items()))
     payload = bytearray()
     payload += struct.pack(">HBBH", frame_count, 0, 0, table_nsym)
     payload += table_bytes

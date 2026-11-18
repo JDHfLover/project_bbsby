@@ -569,7 +569,7 @@ def main() -> int:
                 "ga_val_mean": statistics.mean(ga_scores),
                 "ga_val_std": statistics.stdev(ga_scores) if len(ga_scores) > 1 else 0.0,
                 "commit": commit_hash,
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             },
         )
         print(

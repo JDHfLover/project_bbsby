@@ -704,7 +704,7 @@ def run_selftests(train, valid):
                     h = f(big)
                     d = df(big, h)
             except FloatingPointError as e:
-                raise AssertionError(f"{name}: переповнення на великих |z| ({e})")
+                raise AssertionError(f"{name}: переповнення на великих |z| ({e})") from e
             assert np.isfinite(h).all() and np.isfinite(d).all(), (
                 f"{name}: NaN/inf на великих |z|"
             )

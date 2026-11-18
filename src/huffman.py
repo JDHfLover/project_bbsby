@@ -181,7 +181,7 @@ def build_canonical_codes(lengths: Mapping[int, int]) -> dict[int, tuple[int, in
         bl_count[length] += 1
 
     # Для >= 2 символів дерево має задовольняти точну рівність Крафта: sum(2^(-L)) == 1
-    kraft = sum(count * (1 << (MAX_CODE_LEN - l)) for l, count in enumerate(bl_count) if l > 0)
+    kraft = sum(count * (1 << (MAX_CODE_LEN - bit_len)) for bit_len, count in enumerate(bl_count) if bit_len > 0)
     if kraft != (1 << MAX_CODE_LEN):
         raise ProtocolError(
             "E_CODE",

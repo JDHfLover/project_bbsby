@@ -73,7 +73,7 @@ def test_single_kdf_call_per_session(monkeypatch):
         assert get_kdf_call_count() == 1
         assert real_calls == 1
         for i in range(50):
-            pkt = ctx.seal_payload(f"payload-{i}".encode("utf-8"))
+            pkt = ctx.seal_payload(f"payload-{i}".encode())
             assert len(pkt) >= MIN_PACKET_SIZE
         assert get_kdf_call_count() == 1
         assert real_calls == 1

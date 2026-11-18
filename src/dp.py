@@ -106,7 +106,7 @@ def _build_canonical_codes(lengths: dict[int, int]) -> dict[int, tuple[int, int]
         bl_count = [0] * (MAX_HUFFMAN_CODE_LEN + 1)
         for length in lengths.values():
             if not (1 <= length <= MAX_HUFFMAN_CODE_LEN):
-                raise ProtocolError("E_CODE", f"Некоректна довжина коду: {length}")
+                raise ProtocolError("E_CODE", f"Некоректна довжина коду: {length}") from None
             bl_count[length] += 1
 
         kraft = sum(
@@ -115,7 +115,7 @@ def _build_canonical_codes(lengths: dict[int, int]) -> dict[int, tuple[int, int]
             if length > 0
         )
         if kraft > (1 << MAX_HUFFMAN_CODE_LEN):
-            raise ProtocolError("E_CODE", "Переповнене дерево Гаффмана")
+            raise ProtocolError("E_CODE", "Переповнене дерево Гаффмана") from None
 
         code = 0
         next_code = [0] * (MAX_HUFFMAN_CODE_LEN + 1)
@@ -126,7 +126,7 @@ def _build_canonical_codes(lengths: dict[int, int]) -> dict[int, tuple[int, int]
         canonical: dict[int, tuple[int, int]] = {}
         for sym in sorted(lengths):
             if not (0 <= sym <= 255):
-                raise ProtocolError("E_CODE", f"Символ поза межами 0..255: {sym}")
+                raise ProtocolError("E_CODE", f"Символ поза межами 0..255: {sym}") from None
             length = lengths[sym]
             canonical[sym] = (next_code[length], length)
             next_code[length] += 1
@@ -142,7 +142,7 @@ def _pack_bitstream(data: bytes, canonical_codes: dict[int, tuple[int, int]]) ->
         bits_in_acc = 0
         for byte in data:
             if byte not in canonical_codes:
-                raise ProtocolError("E_CODE", f"Символ {byte} відсутній у таблиці")
+                raise ProtocolError("E_CODE", f"Символ {byte} відсутній у таблиці") from None
             code, length = canonical_codes[byte]
             acc = (acc << length) | code
             bits_in_acc += length
@@ -168,9 +168,9 @@ def _seal_packet(
         return _crypto_seal_packet(payload, password, salt, nonce, device_id, packet_seq)
     except NotImplementedError:
         if len(salt) != 16:
-            raise ProtocolError("E_PAYLOAD", "salt має містити 16 байтів")
+            raise ProtocolError("E_PAYLOAD", "salt має містити 16 байтів") from None
         if len(nonce) != 12:
-            raise ProtocolError("E_PAYLOAD", "nonce має містити 12 байтів")
+            raise ProtocolError("E_PAYLOAD", "nonce має містити 12 байтів") from None
         _check_int(device_id, "device_id", 0, 0xFFFF)
         _check_int(packet_seq, "packet_seq", 0, 0xFFFFFFFF)
 

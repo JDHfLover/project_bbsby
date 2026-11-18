@@ -83,7 +83,7 @@ class TelemetryFrame:
         )
 
     @classmethod
-    def from_bytes(cls, data: bytes | bytearray | memoryview) -> "TelemetryFrame":
+    def from_bytes(cls, data: bytes | bytearray | memoryview) -> TelemetryFrame:
         """Десеріалізує 12 байтів у TelemetryFrame з перевіркою допустимих значень."""
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise ProtocolError("E_PAYLOAD", f"Очікувались байти кадру, отримано {type(data).__name__}")
@@ -194,7 +194,7 @@ def load_frames_csv(
     Повертає `(frames, labels)` або `(frames, None)` при `with_labels=False`.
     """
     try:
-        with open(path, mode="r", encoding="utf-8", newline="") as fh:
+        with open(path, encoding="utf-8", newline="") as fh:
             reader = csv.reader(fh)
             raw_header = next(reader, None)
             if raw_header is None:

@@ -41,10 +41,10 @@ def _assert_prefix_free_and_kraft(lengths: dict[int, int], canonical: dict[int, 
     if len(lengths) == 1:
         only_len = next(iter(lengths.values()))
         assert only_len == 1
-        kraft_scaled = sum(1 << (MAX_CODE_LEN - l) for l in lengths.values())
+        kraft_scaled = sum(1 << (MAX_CODE_LEN - bit_len) for bit_len in lengths.values())
         assert kraft_scaled == (1 << (MAX_CODE_LEN - 1))  # 0.5 для виродженого випадку
     else:
-        kraft_scaled = sum(1 << (MAX_CODE_LEN - l) for l in lengths.values())
+        kraft_scaled = sum(1 << (MAX_CODE_LEN - bit_len) for bit_len in lengths.values())
         assert kraft_scaled == (1 << MAX_CODE_LEN)
 
 

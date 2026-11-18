@@ -196,7 +196,7 @@ def test_all_negative_mutations_and_ambiguous_codes():
     lengths = build_code_lengths(raw12)
     codes = build_canonical_codes(lengths)
     bs = pack_bitstream(raw12, codes)
-    tbl_bytes = b"".join(struct.pack(">BB", s, l) for s, l in sorted(lengths.items()))
+    tbl_bytes = b"".join(struct.pack(">BB", sym, bit_len) for sym, bit_len in sorted(lengths.items()))
     trunc_plain = (
         struct.pack(">HBBH", 1, 0, 0, len(lengths))
         + tbl_bytes
