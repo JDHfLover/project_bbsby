@@ -2,8 +2,9 @@
 
 def get_default_hyperparams(config: dict) -> dict:
     """Повертає базові параметри системи для вимірювання Q_baseline (Чекпоінт 1)."""
+    pack_cfg = config.get("пакування", config) if isinstance(config, dict) else {}
     return {
-        "block_size": int(config.get("candidate_window_frames", 64)),
+        "block_size": int(pack_cfg.get("candidate_window_frames", 64)),
         "compression_threshold": 0.98,
         "priority_weight": 1.0,
     }
