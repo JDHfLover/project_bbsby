@@ -20,7 +20,6 @@ import random
 import statistics
 import subprocess
 import sys
-import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -32,7 +31,6 @@ from src.ga import (
     DEFAULT_TRAIN_SEEDS,
     DEFAULT_VAL_SCENARIOS,
     DEFAULT_VAL_SEEDS,
-    GENE_BOUNDS,
     PipelineGridTable,
     build_fitness_evaluator,
     build_pipeline_grid_table,

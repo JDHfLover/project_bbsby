@@ -289,7 +289,8 @@ def test_real_pipeline_adapter_and_grid_table_integration(tmp_path: Path):
     with pytest.raises(ValueError):
         call_pipeline(defaults, scenario="аварійний", seed=FORBIDDEN_CHANNEL_SEED)
 
-    # Перевірка чутливості на реальному конвеєрі: block_size=36 перевершує 64 в аварійному сценарії
+    # Перевірка чутливості на реальному конвеєрі: при виправленій черзі block_size=64 концентрує
+    # критичні кадри у 47 пакетах і суттєво перевершує block_size=36 в аварійному сценарії
     q_b36 = call_pipeline(
         {"block_size": 36, "compression_threshold": 0.0, "priority_weight": 5.0},
         scenario="аварійний",
@@ -297,7 +298,8 @@ def test_real_pipeline_adapter_and_grid_table_integration(tmp_path: Path):
         fixed_compute_time_s=0.15,
     )
     q_b64 = call_pipeline(defaults, scenario="аварійний", seed=11, fixed_compute_time_s=0.15)
-    assert q_b36 > q_b64
+    assert q_b64 > q_b36
+    assert abs(q_b64 - q_b36) > 0.05
 
     # Однократна пакетна оптимізація в build_fitness_evaluator(call_pipeline)
     pipe_train_eval = build_fitness_evaluator(
