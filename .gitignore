@@ -10,3 +10,4 @@ htmlcov/
 .vscode/
 .idea/
 artifacts/
+sample_inputs/

@@ -13,5 +13,6 @@ ignore = ["E501", "B905"]
 "src/crypto.py" = ["F401"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"

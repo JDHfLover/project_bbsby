@@ -1,7 +1,7 @@
 {
   "team_id": "T01",
-  "commit": "904e7cd",
-  "timestamp": "2026-11-18T22:34:22.792685+00:00",
+  "commit": "c11c30d",
+  "timestamp": "2026-11-18T23:58:37.411626+00:00",
   "val_seeds": [
     21,
     22,
@@ -12,7 +12,7 @@
   "frames_total": 3000,
   "critical_frames_total": 300,
   "time_limit_check": {
-    "total_3scenario_wall_time_s": 3.6103,
+    "total_3scenario_wall_time_s": 2.6295,
     "time_limit_s": 120.0,
     "passes_time_limit": true
   },
@@ -24,33 +24,33 @@
   "ga_best_params": {
     "best_genes": {
       "block_size": 64,
-      "compression_threshold": 1.0,
-      "priority_weight": 10.0
+      "compression_threshold": 0.9482779529794823,
+      "priority_weight": 5.007324009623861
     },
-    "best_fitness": 0.7185698625849172,
+    "best_fitness": 0.7186930524919871,
     "seed": 0,
     "ga_vs_random": {
       "ga_baseline": {
         "runs": 10,
         "budget": 200,
-        "train_mean": 0.704008,
-        "val_mean": 0.719717,
-        "val_std": 0.000147,
-        "delta_vs_random": 0.000477
+        "train_mean": 0.70378,
+        "val_mean": 0.719492,
+        "val_std": 4.2e-05,
+        "delta_vs_random": 0.000345
       },
       "random_search": {
         "runs": 10,
         "budget": 200,
-        "train_mean": 0.703523,
-        "val_mean": 0.71924,
-        "val_std": 0.000811,
+        "train_mean": 0.703411,
+        "val_mean": 0.719147,
+        "val_std": 0.000668,
         "delta_vs_random": 0.0
       }
     }
   },
   "channel_scenarios": {
     "default_baseline": {
-      "mean_Q_3_scenarios": 0.6859,
+      "mean_Q_3_scenarios": 0.6852,
       "all_thresholds_passed": true,
       "scenarios": {
         "спокійний": {
@@ -61,9 +61,9 @@
           "crit_loss_mean": 0.0,
           "crit_loss_threshold": 0.0,
           "passes_threshold": true,
-          "T_mean": 0.9509,
-          "Q_mean": 0.6706,
-          "Q_std": 0.0
+          "T_mean": 0.9461,
+          "Q_mean": 0.6699,
+          "Q_std": 0.0001
         },
         "робочий": {
           "packets_total": 128,
@@ -73,8 +73,8 @@
           "crit_loss_mean": 0.018,
           "crit_loss_threshold": 0.05,
           "passes_threshold": true,
-          "T_mean": 0.9508,
-          "Q_mean": 0.6643,
+          "T_mean": 0.9459,
+          "Q_mean": 0.6636,
           "Q_std": 0.0036
         },
         "аварійний": {
@@ -85,14 +85,14 @@
           "crit_loss_mean": 0.1833,
           "crit_loss_threshold": 0.2,
           "passes_threshold": true,
-          "T_mean": 0.9525,
-          "Q_mean": 0.7228,
+          "T_mean": 0.9478,
+          "Q_mean": 0.7221,
           "Q_std": 0.0222
         }
       }
     },
     "ga_optimized": {
-      "mean_Q_3_scenarios": 0.7193,
+      "mean_Q_3_scenarios": 0.7191,
       "all_thresholds_passed": true,
       "scenarios": {
         "спокійний": {
@@ -103,8 +103,8 @@
           "crit_loss_mean": 0.0,
           "crit_loss_threshold": 0.0,
           "passes_threshold": true,
-          "T_mean": 0.9621,
-          "Q_mean": 0.7203,
+          "T_mean": 0.9603,
+          "Q_mean": 0.72,
           "Q_std": 0.0
         },
         "робочий": {
@@ -115,8 +115,8 @@
           "crit_loss_mean": 0.018,
           "crit_loss_threshold": 0.05,
           "passes_threshold": true,
-          "T_mean": 0.9621,
-          "Q_mean": 0.714,
+          "T_mean": 0.9604,
+          "Q_mean": 0.7137,
           "Q_std": 0.0036
         },
         "аварійний": {
@@ -127,8 +127,8 @@
           "crit_loss_mean": 0.1833,
           "crit_loss_threshold": 0.2,
           "passes_threshold": true,
-          "T_mean": 0.9623,
-          "Q_mean": 0.7237,
+          "T_mean": 0.9606,
+          "Q_mean": 0.7234,
           "Q_std": 0.0222
         }
       }
@@ -136,44 +136,44 @@
   },
   "ablation_mean_q_3_scenarios": {
     "full_system_ga": {
-      "Q_mean": 0.7193,
-      "delta_vs_default": 0.0334,
+      "Q_mean": 0.7191,
+      "delta_vs_default": 0.0339,
       "delta_vs_full_ga": 0.0,
       "emergency_crit_loss": 0.1833,
       "all_thresholds_passed": true
     },
     "full_system_default": {
-      "Q_mean": 0.6859,
+      "Q_mean": 0.6852,
       "delta_vs_default": 0.0,
-      "delta_vs_full_ga": -0.0334,
+      "delta_vs_full_ga": -0.0339,
       "emergency_crit_loss": 0.1833,
       "all_thresholds_passed": true
     },
     "no_classifier": {
-      "Q_mean": 0.6735,
-      "delta_vs_default": -0.0124,
-      "delta_vs_full_ga": -0.0459,
+      "Q_mean": 0.6729,
+      "delta_vs_default": -0.0123,
+      "delta_vs_full_ga": -0.0462,
       "emergency_crit_loss": 0.1833,
       "all_thresholds_passed": true
     },
     "no_compression": {
-      "Q_mean": 0.7196,
-      "delta_vs_default": 0.0337,
-      "delta_vs_full_ga": 0.0003,
+      "Q_mean": 0.7191,
+      "delta_vs_default": 0.0339,
+      "delta_vs_full_ga": 0.0,
       "emergency_crit_loss": 0.1833,
       "all_thresholds_passed": true
     },
     "greedy_instead_of_dp": {
-      "Q_mean": 0.6837,
-      "delta_vs_default": -0.0022,
+      "Q_mean": 0.6833,
+      "delta_vs_default": -0.0018,
       "delta_vs_full_ga": -0.0357,
       "emergency_crit_loss": 0.1833,
       "all_thresholds_passed": true
     },
     "no_scheduler": {
-      "Q_mean": 0.6854,
-      "delta_vs_default": -0.0005,
-      "delta_vs_full_ga": -0.034,
+      "Q_mean": 0.6848,
+      "delta_vs_default": -0.0004,
+      "delta_vs_full_ga": -0.0342,
       "emergency_crit_loss": 0.188,
       "all_thresholds_passed": true
     }
@@ -187,14 +187,14 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "128",
-      "pack_time_mean_s": "1.0294",
-      "pack_time_std_s": "0.0468",
+      "pack_time_mean_s": "1.2230",
+      "pack_time_std_s": "0.1707",
       "bytes_sent_mean": "65130.0",
       "S_mean": "0.3560",
       "R_mean": "1.0000",
       "crit_loss_mean": "0.0000",
-      "T_mean": "0.9458",
-      "Q_mean": "0.6699",
+      "T_mean": "0.9389",
+      "Q_mean": "0.6688",
       "Q_std": "0.0003"
     },
     {
@@ -205,15 +205,15 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "128",
-      "pack_time_mean_s": "1.0294",
-      "pack_time_std_s": "0.0468",
+      "pack_time_mean_s": "1.2230",
+      "pack_time_std_s": "0.1707",
       "bytes_sent_mean": "65130.0",
       "S_mean": "0.3560",
       "R_mean": "0.9820",
       "crit_loss_mean": "0.0180",
-      "T_mean": "0.9473",
-      "Q_mean": "0.6638",
-      "Q_std": "0.0036"
+      "T_mean": "0.9397",
+      "Q_mean": "0.6626",
+      "Q_std": "0.0035"
     },
     {
       "scenario": "аварійний",
@@ -223,15 +223,15 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "128",
-      "pack_time_mean_s": "1.0294",
-      "pack_time_std_s": "0.0468",
+      "pack_time_mean_s": "1.2230",
+      "pack_time_std_s": "0.1707",
       "bytes_sent_mean": "25214.0",
       "S_mean": "0.5881",
       "R_mean": "0.8167",
       "crit_loss_mean": "0.1833",
-      "T_mean": "0.9496",
-      "Q_mean": "0.7223",
-      "Q_std": "0.0222"
+      "T_mean": "0.9413",
+      "Q_mean": "0.7211",
+      "Q_std": "0.0221"
     },
     {
       "scenario": "спокійний",
@@ -241,15 +241,15 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "144",
-      "pack_time_mean_s": "0.1353",
-      "pack_time_std_s": "0.0359",
+      "pack_time_mean_s": "0.1193",
+      "pack_time_std_s": "0.0148",
       "bytes_sent_mean": "72896.0",
       "S_mean": "0.3306",
       "R_mean": "1.0000",
       "crit_loss_mean": "0.0000",
-      "T_mean": "0.9905",
+      "T_mean": "0.9906",
       "Q_mean": "0.6639",
-      "Q_std": "0.0000"
+      "Q_std": "0.0001"
     },
     {
       "scenario": "робочий",
@@ -259,14 +259,14 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "144",
-      "pack_time_mean_s": "0.1353",
-      "pack_time_std_s": "0.0359",
+      "pack_time_mean_s": "0.1193",
+      "pack_time_std_s": "0.0148",
       "bytes_sent_mean": "72896.0",
       "S_mean": "0.3306",
       "R_mean": "0.9820",
       "crit_loss_mean": "0.0180",
-      "T_mean": "0.9905",
-      "Q_mean": "0.6576",
+      "T_mean": "0.9910",
+      "Q_mean": "0.6577",
       "Q_std": "0.0036"
     },
     {
@@ -277,14 +277,14 @@
       "relative_value_error": "0.000000",
       "dp_strictly_better_windows": "0",
       "packets_total": "144",
-      "pack_time_mean_s": "0.1353",
-      "pack_time_std_s": "0.0359",
+      "pack_time_mean_s": "0.1193",
+      "pack_time_std_s": "0.0148",
       "bytes_sent_mean": "25077.0",
       "S_mean": "0.5894",
       "R_mean": "0.8167",
       "crit_loss_mean": "0.1833",
-      "T_mean": "0.9923",
-      "Q_mean": "0.7294",
+      "T_mean": "0.9931",
+      "Q_mean": "0.7295",
       "Q_std": "0.0222"
     }
   ],

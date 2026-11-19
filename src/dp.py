@@ -1,28 +1,21 @@
 """Модуль гілки `dp`: задача про рюкзак 0/1 (DP, Greedy, Brute-force), пакування payload та планувальник."""
 from __future__ import annotations
 
-import hashlib
-import heapq
-import hmac
 import secrets
 import struct
-from collections import Counter
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from src.crypto import (
-    HEADER_FORMAT,
     HEADER_SIZE,
     HMAC_SIZE,
     resolve_session_password,
-    seal_packet as _crypto_seal_packet,
+    seal_packet,
 )
 from src.huffman import (
-    build_canonical_codes as _huffman_build_canonical_codes,
-    build_code_lengths as _huffman_build_code_lengths,
-    pack_bitstream as _huffman_pack_bitstream,
+    build_canonical_codes,
+    build_code_lengths,
+    pack_bitstream,
 )
-from src.telemetry import FRAME_FORMAT, FRAME_SIZE, TelemetryFrame
+from src.telemetry import FRAME_SIZE, TelemetryFrame
 
 FLAG_PREDICTION = 0x01
 FLAG_DUPLICATION = 0x02
@@ -33,8 +26,6 @@ PAYLOAD_FIXED_OVERHEAD = 14
 PACKET_CRYPTO_OVERHEAD = HEADER_SIZE + HMAC_SIZE  # 75 байтів
 MIN_PACKET_BYTES_ONE_FRAME = PACKET_CRYPTO_OVERHEAD + PAYLOAD_FIXED_OVERHEAD + FRAME_SIZE  # 101 байт
 MAX_HUFFMAN_CODE_LEN = 15
-
-_FALLBACK_KEY_CACHE: dict[tuple[str, bytes], tuple[bytes, bytes]] = {}
 
 
 class ProtocolError(ValueError):
@@ -50,153 +41,6 @@ def _check_int(value: object, name: str, lo: int, hi: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not (lo <= value <= hi):
         raise ProtocolError("E_PAYLOAD", f"{name}={value!r} поза допустимим діапазоном [{lo}, {hi}]")
     return value
-
-
-def _frame_to_bytes(frame: TelemetryFrame) -> bytes:
-    try:
-        return frame.to_bytes()
-    except NotImplementedError:
-        ts = _check_int(frame.timestamp_ms, "timestamp_ms", 0, 0xFFFFFFFF)
-        alt = _check_int(frame.altitude_dm, "altitude_dm", -32768, 32767)
-        temp = _check_int(frame.temp_c10, "temp_c10", -32768, 32767)
-        vib = _check_int(frame.vibration, "vibration", -32768, 32767)
-        mode = _check_int(frame.mode, "mode", 0, 7)
-        crit = _check_int(frame.critical, "critical", 0, 1)
-        return struct.pack(FRAME_FORMAT, ts, alt, temp, vib, mode, crit)
-
-
-def _build_code_lengths(data: bytes) -> dict[int, int]:
-    try:
-        return _huffman_build_code_lengths(data)
-    except NotImplementedError:
-        if not data:
-            return {}
-        freqs = Counter(data)
-        if len(freqs) == 1:
-            return {next(iter(freqs)): 1}
-
-        scale = 1
-        while True:
-            scaled = {sym: max(1, count // scale) for sym, count in freqs.items()}
-            heap: list[tuple[int, int, int, list[int]]] = [
-                (freq, 0, sym, [sym]) for sym, freq in sorted(scaled.items())
-            ]
-            heapq.heapify(heap)
-            lengths = {sym: 0 for sym in freqs}
-
-            while len(heap) > 1:
-                f1, d1, m1, syms1 = heapq.heappop(heap)
-                f2, d2, m2, syms2 = heapq.heappop(heap)
-                merged = syms1 + syms2
-                for sym in merged:
-                    lengths[sym] += 1
-                heapq.heappush(heap, (f1 + f2, max(d1, d2) + 1, min(m1, m2), merged))
-
-            if max(lengths.values()) <= MAX_HUFFMAN_CODE_LEN:
-                return dict(sorted(lengths.items()))
-            scale *= 2
-
-
-def _build_canonical_codes(lengths: dict[int, int]) -> dict[int, tuple[int, int]]:
-    try:
-        return _huffman_build_canonical_codes(lengths)
-    except NotImplementedError:
-        if not lengths:
-            return {}
-        bl_count = [0] * (MAX_HUFFMAN_CODE_LEN + 1)
-        for length in lengths.values():
-            if not (1 <= length <= MAX_HUFFMAN_CODE_LEN):
-                raise ProtocolError("E_CODE", f"Некоректна довжина коду: {length}") from None
-            bl_count[length] += 1
-
-        kraft = sum(
-            count * (1 << (MAX_HUFFMAN_CODE_LEN - length))
-            for length, count in enumerate(bl_count)
-            if length > 0
-        )
-        if kraft > (1 << MAX_HUFFMAN_CODE_LEN):
-            raise ProtocolError("E_CODE", "Переповнене дерево Гаффмана") from None
-
-        code = 0
-        next_code = [0] * (MAX_HUFFMAN_CODE_LEN + 1)
-        for bits in range(1, MAX_HUFFMAN_CODE_LEN + 1):
-            code = (code + bl_count[bits - 1]) << 1
-            next_code[bits] = code
-
-        canonical: dict[int, tuple[int, int]] = {}
-        for sym in sorted(lengths):
-            if not (0 <= sym <= 255):
-                raise ProtocolError("E_CODE", f"Символ поза межами 0..255: {sym}") from None
-            length = lengths[sym]
-            canonical[sym] = (next_code[length], length)
-            next_code[length] += 1
-        return canonical
-
-
-def _pack_bitstream(data: bytes, canonical_codes: dict[int, tuple[int, int]]) -> bytes:
-    try:
-        return _huffman_pack_bitstream(data, canonical_codes)
-    except NotImplementedError:
-        out = bytearray()
-        acc = 0
-        bits_in_acc = 0
-        for byte in data:
-            if byte not in canonical_codes:
-                raise ProtocolError("E_CODE", f"Символ {byte} відсутній у таблиці") from None
-            code, length = canonical_codes[byte]
-            acc = (acc << length) | code
-            bits_in_acc += length
-            while bits_in_acc >= 8:
-                shift = bits_in_acc - 8
-                out.append((acc >> shift) & 0xFF)
-                acc &= (1 << shift) - 1
-                bits_in_acc = shift
-        if bits_in_acc > 0:
-            out.append((acc << (8 - bits_in_acc)) & 0xFF)
-        return bytes(out)
-
-
-def _seal_packet(
-    payload: bytes,
-    password: str,
-    salt: bytes,
-    nonce: bytes,
-    device_id: int = 1,
-    packet_seq: int = 0,
-) -> bytes:
-    try:
-        return _crypto_seal_packet(payload, password, salt, nonce, device_id, packet_seq)
-    except NotImplementedError:
-        if len(salt) != 16:
-            raise ProtocolError("E_PAYLOAD", "salt має містити 16 байтів") from None
-        if len(nonce) != 12:
-            raise ProtocolError("E_PAYLOAD", "nonce має містити 12 байтів") from None
-        _check_int(device_id, "device_id", 0, 0xFFFF)
-        _check_int(packet_seq, "packet_seq", 0, 0xFFFFFFFF)
-
-        cache_key = (password, salt)
-        if cache_key not in _FALLBACK_KEY_CACHE:
-            master = hashlib.pbkdf2_hmac(
-                "sha256", password.encode("utf-8"), salt, iterations=100000, dklen=64
-            )
-            _FALLBACK_KEY_CACHE[cache_key] = (master[:32], master[32:64])
-        key_enc, key_mac = _FALLBACK_KEY_CACHE[cache_key]
-
-        initial_counter = nonce + struct.pack(">I", 1)
-        encryptor = Cipher(algorithms.AES(key_enc), modes.CTR(initial_counter)).encryptor()
-        ciphertext = encryptor.update(payload) + encryptor.finalize()
-        header = struct.pack(
-            HEADER_FORMAT,
-            b"TLM1",
-            1,
-            device_id,
-            packet_seq,
-            salt,
-            nonce,
-            len(ciphertext),
-        )
-        tag = hmac.new(key_mac, header + ciphertext, hashlib.sha256).digest()
-        return header + ciphertext + tag
 
 
 def _validate_knapsack_inputs(weights: list[int], values: list[int]) -> None:
@@ -215,7 +59,7 @@ def compute_frame_bit_weights(
     """Обчислює вагу кожного кадру w_i в бітах за спільною таблицею Гаффмана вікна."""
     weights: list[int] = []
     for frame in window:
-        raw = _frame_to_bytes(frame)
+        raw = frame.to_bytes()
         total = 0
         for b in raw:
             if b not in lengths or lengths[b] <= 0:
@@ -317,8 +161,8 @@ def select_frames_for_packet(
     if len(window) != len(values):
         raise ValueError("Кількість кадрів у вікні та кількість цінностей мають збігатися")
 
-    all_bytes = b"".join(_frame_to_bytes(f) for f in window)
-    lengths = _build_code_lengths(all_bytes)
+    all_bytes = b"".join(f.to_bytes() for f in window)
+    lengths = build_code_lengths(all_bytes)
     table_nsym = len(lengths)
     capacity_bits = 8 * (max_payload_bytes - PAYLOAD_FIXED_OVERHEAD - 2 * table_nsym)
 
@@ -353,7 +197,7 @@ def build_payload(
     classes: list[int] | None = None,
 ) -> bytes:
     """Формує відкрите навантаження пакета за Розділом 3 FORMAT_SPEC_1.md."""
-    raw_bytes = b"".join(_frame_to_bytes(f) for f in frames)
+    raw_bytes = b"".join(f.to_bytes() for f in frames)
     frame_count = len(frames)
     symbol_count = FRAME_SIZE * frame_count
 
@@ -363,13 +207,13 @@ def build_payload(
         bitstream = raw_bytes
     else:
         if lengths is None:
-            lengths = _build_code_lengths(raw_bytes)
-        canonical = _build_canonical_codes(lengths)
+            lengths = build_code_lengths(raw_bytes)
+        canonical = build_canonical_codes(lengths)
         table_nsym = len(lengths)
         table_bytes = b"".join(
             struct.pack(">BB", sym, length) for sym, length in sorted(lengths.items())
         )
-        bitstream = _pack_bitstream(raw_bytes, canonical)
+        bitstream = pack_bitstream(raw_bytes, canonical)
 
     payload = bytearray()
     payload += struct.pack(">HBBH", frame_count, flags, 0, table_nsym)
@@ -589,7 +433,7 @@ def pack_telemetry_stream(
         if seq > 0xFFFFFFFF:
             raise ProtocolError("E_PAYLOAD", "Переповнення uint32 packet_seq: потрібно почати новий сеанс")
         nonce = eff_prefix + struct.pack(">I", seq)
-        pkt = _seal_packet(
+        pkt = seal_packet(
             payload, eff_password, eff_salt, nonce, device_id=device_id, packet_seq=seq
         )
         if len(pkt) > eff_max_pkt:

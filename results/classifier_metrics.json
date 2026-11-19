@@ -1,6 +1,6 @@
 {
-  "date": "2026-11-18T01:48:25",
-  "commit": "29c4983",
+  "date": "2026-11-19T01:56:20",
+  "commit": "c11c30d",
   "protocol": "80/20 block split of train.csv with w-1 gap; model selected by val_macro_f1; evaluated on valid.csv",
   "architecture": "7->32->3 (ReLU + softmax)",
   "window_size": 5,
@@ -44,7 +44,7 @@
   },
   "session_inference": {
     "frames": 3000,
-    "inference_time_s": 0.008893,
+    "inference_time_s": 0.008705,
     "predicted_class_counts": {
       "0": 2360,
       "1": 282,
